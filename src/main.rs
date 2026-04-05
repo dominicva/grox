@@ -31,7 +31,14 @@ async fn main() -> Result<()> {
 
     let system_prompt = json!({
         "role": "system",
-        "content": "You are Grox, a coding agent powered by Grok. You have access to tools for reading files. Use them to help the developer understand and work with their codebase. Be concise and helpful."
+        "content": "You are Grox, a coding agent powered by Grok. You help developers understand and work with their codebase.
+
+Rules:
+- Be concise and direct. Lead with the answer, not the process.
+- Do NOT narrate what you are about to do or explain your tool usage. Just use tools silently and respond with findings.
+- Do NOT thank the user for letting you read files — you have autonomous access to tools.
+- When exploring a codebase, use list_files and file_read proactively to gather context before responding.
+- Keep responses short. Use bullet points over paragraphs. Skip preamble."
     });
 
     let mut previous_response_id: Option<String> = None;
@@ -76,18 +83,22 @@ async fn main() -> Result<()> {
                     let _ = stdout().flush();
                 },
                 &mut |name: &str, args: &str| {
-                    print!("\n  {} {}\n", format!("[{name}]").cyan(), args.dimmed());
+                    // Compact one-line display: extract the key param for summary
+                    let summary = summarize_tool_call(name, args);
+                    println!("  {} {}", format!("▸ {name}").cyan(), summary.dimmed());
                     let _ = stdout().flush();
                 },
                 &mut |_name: &str, output: &str| {
-                    let display = if output.len() > 500 {
-                        format!("{}...", &output[..500])
+                    // Show a brief result summary, not the full output
+                    let lines: Vec<&str> = output.lines().collect();
+                    let summary = if lines.len() > 5 {
+                        format!("  {} ({} lines)", "✓".green(), lines.len())
+                    } else if output.is_empty() {
+                        format!("  {} (empty)", "✓".green())
                     } else {
-                        output.to_string()
+                        format!("  {} ({} bytes)", "✓".green(), output.len())
                     };
-                    println!("{}", display.dimmed());
-                    print!("\n{} ", "grok:".magenta().bold());
-                    let _ = stdout().flush();
+                    println!("{}", summary.dimmed());
                 },
             )
             .await
@@ -114,4 +125,14 @@ async fn main() -> Result<()> {
 
     println!("{}", "\ngoodbye.".dimmed());
     Ok(())
+}
+
+fn summarize_tool_call(name: &str, args: &str) -> String {
+    let parsed: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
+    match name {
+        "file_read" | "list_files" => {
+            parsed["path"].as_str().unwrap_or("?").to_string()
+        }
+        _ => args.to_string(),
+    }
 }
