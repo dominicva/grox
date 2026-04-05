@@ -81,10 +81,20 @@ async fn main() -> Result<()> {
     let client = GrokClient::new(api_key, model);
     let agent = Agent::new(&client, &project_root);
 
-    let system_prompt = json!({
-        "role": "system",
-        "content": format!(
-            "You are Grox, a coding agent powered by Grok. You help developers understand and work with their codebase.
+    // Load GROX.md custom instructions if present
+    let grox_md = util::load_grox_md(&project_root);
+    if let Some(ref content) = grox_md {
+        if content.contains("truncated") {
+            eprintln!(
+                "{}",
+                "  warning: GROX.md exceeds 10K characters and was truncated"
+                    .yellow()
+            );
+        }
+    }
+
+    let mut system_content = format!(
+        "You are Grox, a coding agent powered by Grok. You help developers understand and work with their codebase.
 
 Project root: {}
 
@@ -94,8 +104,17 @@ Rules:
 - Do NOT thank the user for letting you read files — you have autonomous access to tools.
 - When exploring a codebase, use list_files and file_read proactively to gather context before responding.
 - Keep responses short. Use bullet points over paragraphs. Skip preamble.",
-            project_root.display()
-        )
+        project_root.display()
+    );
+
+    if let Some(custom) = &grox_md {
+        system_content.push_str("\n\n--- Project Instructions (GROX.md) ---\n\n");
+        system_content.push_str(custom);
+    }
+
+    let system_prompt = json!({
+        "role": "system",
+        "content": system_content
     });
 
     let mut previous_response_id: Option<String> = None;

@@ -94,6 +94,22 @@ fn clip(output: &str, max: usize) -> String {
     }
 }
 
+const GROX_MD_MAX_CHARS: usize = 10_000;
+
+/// Load GROX.md from the project root if it exists.
+/// Returns None if the file doesn't exist. Truncates with warning if over 10K chars.
+pub fn load_grox_md(project_root: &Path) -> Option<String> {
+    let path = project_root.join("GROX.md");
+    let content = std::fs::read_to_string(&path).ok()?;
+    if content.len() <= GROX_MD_MAX_CHARS {
+        Some(content)
+    } else {
+        let truncated = &content[..GROX_MD_MAX_CHARS];
+        let remaining = content.len() - GROX_MD_MAX_CHARS;
+        Some(format!("{truncated}\n\n... (GROX.md truncated — {remaining} characters omitted)"))
+    }
+}
+
 /// Check if file contents appear to be binary (contain null bytes in the first 8KB).
 pub fn is_binary(data: &[u8]) -> bool {
     let check_len = data.len().min(8192);
@@ -244,5 +260,41 @@ mod tests {
     #[test]
     fn binary_detection_empty() {
         assert!(!is_binary(b""));
+    }
+
+    // --- load_grox_md ---
+
+    #[test]
+    fn load_grox_md_present() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("GROX.md"), "You are a helpful assistant.").unwrap();
+        let result = load_grox_md(dir.path());
+        assert_eq!(result, Some("You are a helpful assistant.".to_string()));
+    }
+
+    #[test]
+    fn load_grox_md_absent() {
+        let dir = tempdir().unwrap();
+        let result = load_grox_md(dir.path());
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn load_grox_md_truncated_over_10k() {
+        let dir = tempdir().unwrap();
+        let long = "x".repeat(12_000);
+        fs::write(dir.path().join("GROX.md"), &long).unwrap();
+        let result = load_grox_md(dir.path()).unwrap();
+        assert!(result.len() < long.len());
+        assert!(result.contains("truncated"));
+    }
+
+    #[test]
+    fn load_grox_md_at_exactly_10k() {
+        let dir = tempdir().unwrap();
+        let exact = "y".repeat(10_000);
+        fs::write(dir.path().join("GROX.md"), &exact).unwrap();
+        let result = load_grox_md(dir.path()).unwrap();
+        assert_eq!(result, exact);
     }
 }
