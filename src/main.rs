@@ -152,6 +152,8 @@ Rules:
                     let _ = stdout().flush();
                 },
                 &mut |name: &str, output: &str| {
+                    const MAX_DISPLAY_LINES: usize = 20;
+
                     let is_error = output.starts_with("Error:")
                         || output.starts_with("File '")
                         || output.starts_with("Permission denied");
@@ -159,13 +161,21 @@ Rules:
                         let msg = output.lines().next().unwrap_or(output);
                         println!("{}", format!("  {} {}", "✗".red(), msg).dimmed());
                     } else if name == "shell_exec" {
-                        // Always show shell output — never suppress terminal output
                         if output.is_empty() || output == "(no output)" {
                             println!("{}", format!("  {} (no output)", "✓".green()).dimmed());
                         } else {
+                            let lines: Vec<&str> = output.lines().collect();
+                            let total = lines.len();
+                            let show = total.min(MAX_DISPLAY_LINES);
                             println!("{}", format!("  {}", "✓".green()).dimmed());
-                            for line in output.lines() {
+                            for line in &lines[..show] {
                                 println!("  {}", line.dimmed());
+                            }
+                            if total > MAX_DISPLAY_LINES {
+                                println!(
+                                    "  {}",
+                                    format!("... ({} more lines)", total - MAX_DISPLAY_LINES).dimmed()
+                                );
                             }
                         }
                     } else if output.is_empty() {
