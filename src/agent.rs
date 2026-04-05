@@ -74,7 +74,7 @@ impl<'a> Agent<'a> {
                     "Permission denied by user".to_string()
                 } else {
                     match Tool::from_name(&tc.name) {
-                        Some(tool) => match tool.execute(&tc.arguments, &self.project_root) {
+                        Some(tool) => match tool.execute(&tc.arguments, &self.project_root).await {
                             Ok(result) => result,
                             Err(e) => format!("Error: {e}"),
                         },

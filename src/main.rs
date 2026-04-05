@@ -215,6 +215,15 @@ fn summarize_tool_call(name: &str, args: &str) -> String {
             let len = parsed["content"].as_str().map(|c| c.len()).unwrap_or(0);
             format!("{path} ({len} bytes)")
         }
+        "shell_exec" => {
+            let cmd = parsed["command"].as_str().unwrap_or("?");
+            let truncated: String = cmd.chars().take(80).collect();
+            if truncated.len() < cmd.len() {
+                format!("{truncated}…")
+            } else {
+                truncated
+            }
+        }
         _ => args.to_string(),
     }
 }
