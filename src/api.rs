@@ -116,12 +116,21 @@ impl GrokApi for GrokClient {
                         break;
                     }
 
+                    if std::env::var("GROX_VERBOSE").is_ok() {
+                        eprintln!("[SSE] event={} data={}", msg.event, msg.data);
+                    }
+
                     let parsed: Value = serde_json::from_str(&msg.data)
                         .with_context(|| format!("Failed to parse SSE: {}", msg.data))?;
 
-                    let event_type = parsed.get("type")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("");
+                    // SSE event type can come from the SSE event field or JSON type field
+                    let event_type = if !msg.event.is_empty() && msg.event != "message" {
+                        msg.event.as_str()
+                    } else {
+                        parsed.get("type")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("")
+                    };
 
                     match event_type {
                         // Streaming text delta

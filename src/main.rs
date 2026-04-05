@@ -88,9 +88,15 @@ Rules:
             .run(
                 api_input,
                 previous_response_id.as_deref(),
-                &mut |token: String| {
-                    print!("{token}");
-                    let _ = stdout().flush();
+                &mut {
+                    let mut first_token = true;
+                    move |token: String| {
+                        if first_token && !token.trim().is_empty() {
+                            first_token = false;
+                        }
+                        print!("{token}");
+                        let _ = stdout().flush();
+                    }
                 },
                 &mut |name: &str, args: &str| {
                     // Compact one-line display: extract the key param for summary
@@ -99,9 +105,13 @@ Rules:
                     let _ = stdout().flush();
                 },
                 &mut |_name: &str, output: &str| {
-                    // Show a brief result summary, not the full output
+                    let is_error = output.starts_with("Error:") || output.starts_with("File '");
                     let lines: Vec<&str> = output.lines().collect();
-                    let summary = if lines.len() > 5 {
+                    let summary = if is_error {
+                        // Show the error inline so user can see what happened
+                        let msg = output.lines().next().unwrap_or(output);
+                        format!("  {} {}", "✗".red(), msg)
+                    } else if lines.len() > 5 {
                         format!("  {} ({} lines)", "✓".green(), lines.len())
                     } else if output.is_empty() {
                         format!("  {} (empty)", "✓".green())
@@ -114,7 +124,13 @@ Rules:
             .await
         {
             Ok(result) => {
-                println!("\n");
+                if result.text.is_empty() {
+                    println!(
+                        "{}",
+                        "(no response from model)".dimmed()
+                    );
+                }
+                println!();
                 if let Some(usage) = &result.usage {
                     println!(
                         "{}",
