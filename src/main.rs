@@ -257,11 +257,12 @@ Rules:
                 }
                 println!();
                 if let Some(usage) = &result.usage {
+                    let cost_str = estimate_cost(client.model(), usage);
                     println!(
                         "{}",
                         format!(
-                            "  tokens: {} in / {} out",
-                            usage.input_tokens, usage.output_tokens
+                            "  tokens: {} in / {} out{}",
+                            usage.input_tokens, usage.output_tokens, cost_str
                         )
                         .dimmed()
                     );
@@ -276,6 +277,27 @@ Rules:
 
     println!("{}", "\ngoodbye.".dimmed());
     Ok(())
+}
+
+/// Best-effort cost estimate. Returns empty string if pricing is unknown.
+fn estimate_cost(model: &str, usage: &api::Usage) -> String {
+    // Pricing: (input $/1M tokens, output $/1M tokens)
+    let pricing: Option<(f64, f64)> = match model {
+        m if m.starts_with("grok-3-mini") => Some((0.30, 0.50)),
+        m if m.starts_with("grok-3") => Some((3.00, 15.00)),
+        m if m.starts_with("grok-2") => Some((2.00, 10.00)),
+        _ => None,
+    };
+
+    match pricing {
+        Some((input_rate, output_rate)) => {
+            let cost = (usage.input_tokens as f64 * input_rate
+                + usage.output_tokens as f64 * output_rate)
+                / 1_000_000.0;
+            format!("  (~${cost:.4})")
+        }
+        None => String::new(),
+    }
 }
 
 fn summarize_tool_call(name: &str, args: &str) -> String {
