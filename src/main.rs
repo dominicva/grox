@@ -151,22 +151,34 @@ Rules:
                     println!("  {} {}", format!("▸ {name}").cyan(), summary.dimmed());
                     let _ = stdout().flush();
                 },
-                &mut |_name: &str, output: &str| {
+                &mut |name: &str, output: &str| {
                     let is_error = output.starts_with("Error:")
                         || output.starts_with("File '")
                         || output.starts_with("Permission denied");
-                    let lines: Vec<&str> = output.lines().collect();
-                    let summary = if is_error {
+                    if is_error {
                         let msg = output.lines().next().unwrap_or(output);
-                        format!("  {} {}", "✗".red(), msg)
-                    } else if lines.len() > 5 {
-                        format!("  {} ({} lines)", "✓".green(), lines.len())
+                        println!("{}", format!("  {} {}", "✗".red(), msg).dimmed());
+                    } else if name == "shell_exec" {
+                        // Always show shell output — never suppress terminal output
+                        if output.is_empty() || output == "(no output)" {
+                            println!("{}", format!("  {} (no output)", "✓".green()).dimmed());
+                        } else {
+                            println!("{}", format!("  {}", "✓".green()).dimmed());
+                            for line in output.lines() {
+                                println!("  {}", line.dimmed());
+                            }
+                        }
                     } else if output.is_empty() {
-                        format!("  {} (empty)", "✓".green())
+                        println!("{}", format!("  {} (empty)", "✓".green()).dimmed());
                     } else {
-                        format!("  {} ({} bytes)", "✓".green(), output.len())
-                    };
-                    println!("{}", summary.dimmed());
+                        let lines: Vec<&str> = output.lines().collect();
+                        let summary = if lines.len() > 5 {
+                            format!("  {} ({} lines)", "✓".green(), lines.len())
+                        } else {
+                            format!("  {} ({} bytes)", "✓".green(), output.len())
+                        };
+                        println!("{}", summary.dimmed());
+                    }
                 },
                 &mut |name: &str, args: &str| -> bool {
                     session_perms.authorize(name, args)
