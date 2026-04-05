@@ -84,8 +84,7 @@ async fn main() -> Result<()> {
 
     let mut session_perms = SessionPermissions::new(permission_mode, project_root.clone());
 
-    let client = GrokClient::new(api_key, model);
-    let agent = Agent::new(&client, &project_root);
+    let mut client = GrokClient::new(api_key, model);
 
     // Load GROX.md custom instructions if present
     let grox_md = util::load_grox_md(&project_root);
@@ -144,6 +143,33 @@ Rules:
             break;
         }
 
+        if input.starts_with("/model ") {
+            let new_model = input.strip_prefix("/model ").unwrap().trim().to_string();
+            if new_model.is_empty() {
+                println!("{}", "usage: /model <name>".dimmed());
+            } else {
+                client.set_model(new_model.clone());
+                println!("  model switched to {}", new_model.cyan());
+            }
+            continue;
+        }
+
+        if input == "/status" {
+            println!("  model:   {}", client.model().cyan());
+            println!("  project: {}", project_root.display().to_string().cyan());
+            println!("  mode:    {}", format!("{permission_mode}").cyan());
+            println!(
+                "  tools:   {}",
+                tools::Tool::all()
+                    .iter()
+                    .map(|t| format!("{t:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+                    .dimmed()
+            );
+            continue;
+        }
+
         rl.add_history_entry(&input)?;
 
         let api_input = vec![
@@ -156,6 +182,7 @@ Rules:
 
         println!();
 
+        let agent = Agent::new(&client, &project_root);
         match agent
             .run(
                 api_input,

@@ -56,6 +56,10 @@ impl GrokClient {
     pub fn model(&self) -> &str {
         &self.model
     }
+
+    pub fn set_model(&mut self, model: String) {
+        self.model = model;
+    }
 }
 
 // Responses API request body
