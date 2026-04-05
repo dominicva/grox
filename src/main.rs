@@ -232,6 +232,11 @@ fn summarize_tool_call(name: &str, args: &str) -> String {
         "file_read" | "list_files" => {
             parsed["path"].as_str().unwrap_or("?").to_string()
         }
+        "grep" => {
+            let pattern = parsed["pattern"].as_str().unwrap_or("?");
+            let path = parsed["path"].as_str().unwrap_or(".");
+            format!("{pattern} in {path}")
+        }
         "file_write" => {
             let path = parsed["path"].as_str().unwrap_or("?");
             let len = parsed["content"].as_str().map(|c| c.len()).unwrap_or(0);

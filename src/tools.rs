@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
@@ -13,6 +13,7 @@ pub enum Tool {
     FileWrite,
     ListFiles,
     ShellExec,
+    Grep,
 }
 
 #[derive(Debug, Clone)]
@@ -24,7 +25,7 @@ pub struct ToolCall {
 
 impl Tool {
     pub fn all() -> Vec<Tool> {
-        vec![Tool::FileRead, Tool::FileWrite, Tool::ListFiles, Tool::ShellExec]
+        vec![Tool::FileRead, Tool::FileWrite, Tool::ListFiles, Tool::ShellExec, Tool::Grep]
     }
 
     pub fn definitions() -> Vec<Value> {
@@ -37,6 +38,7 @@ impl Tool {
             "file_write" => Some(Tool::FileWrite),
             "list_files" => Some(Tool::ListFiles),
             "shell_exec" => Some(Tool::ShellExec),
+            "grep" => Some(Tool::Grep),
             _ => None,
         }
     }
@@ -95,6 +97,38 @@ impl Tool {
                     "additionalProperties": false
                 }
             }),
+            Tool::Grep => json!({
+                "type": "function",
+                "name": "grep",
+                "description": "Search file contents using ripgrep. Returns matching lines with file paths and line numbers. Use this to find code patterns, function definitions, imports, and references across the codebase.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "Regex pattern to search for"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Directory or file to search in (defaults to project root)"
+                        },
+                        "glob": {
+                            "type": "string",
+                            "description": "Glob pattern to filter files (e.g. '*.rs', '*.ts')"
+                        },
+                        "case_insensitive": {
+                            "type": "boolean",
+                            "description": "Case-insensitive search (default: false)"
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Maximum number of matching lines to return (default: 100)"
+                        }
+                    },
+                    "required": ["pattern"],
+                    "additionalProperties": false
+                }
+            }),
             Tool::ShellExec => json!({
                 "type": "function",
                 "name": "shell_exec",
@@ -128,6 +162,7 @@ impl Tool {
             Tool::FileWrite => execute_file_write(arguments, project_root),
             Tool::ListFiles => execute_list_files(arguments),
             Tool::ShellExec => execute_shell_exec(arguments, project_root).await,
+            Tool::Grep => execute_grep(arguments, project_root).await,
         }
     }
 }
@@ -263,6 +298,85 @@ async fn execute_shell_exec(arguments: &str, project_root: &Path) -> Result<Stri
     Ok(util::clip_for_model(&result))
 }
 
+async fn execute_grep(arguments: &str, project_root: &Path) -> Result<String> {
+    let args: Value = serde_json::from_str(arguments)?;
+    let pattern = args["pattern"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing required parameter: pattern"))?;
+
+    let search_path = args["path"]
+        .as_str()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| project_root.to_path_buf());
+
+    let max_results = args["max_results"]
+        .as_u64()
+        .unwrap_or(100) as usize;
+
+    let mut cmd = Command::new("rg");
+    cmd.arg("--line-number")
+        .arg("--no-heading")
+        .arg("--color=never");
+
+    if args["case_insensitive"].as_bool().unwrap_or(false) {
+        cmd.arg("--ignore-case");
+    }
+
+    if let Some(glob) = args["glob"].as_str() {
+        cmd.arg("--glob").arg(glob);
+    }
+
+    cmd.arg("--max-count").arg(max_results.to_string());
+
+    cmd.arg(pattern).arg(&search_path);
+
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+
+    let output = match timeout(Duration::from_secs(30), cmd.output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(e)) => {
+            let msg = e.to_string();
+            if msg.contains("No such file or directory") || msg.contains("not found") {
+                bail!("ripgrep (rg) is not installed. Install it with: cargo install ripgrep");
+            }
+            bail!("Failed to run ripgrep: {e}");
+        }
+        Err(_) => bail!("Grep timed out after 30s"),
+    };
+
+    match output.status.code() {
+        Some(0) => {
+            // Matches found — cap output lines
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let lines: Vec<&str> = stdout.lines().collect();
+            if lines.len() > max_results {
+                let truncated: String = lines[..max_results].join("\n");
+                Ok(format!("{truncated}\n\n... (results capped at {max_results})"))
+            } else {
+                Ok(util::clip_for_model(stdout.trim_end()))
+            }
+        }
+        Some(1) => {
+            // No matches
+            Ok("No matches found.".to_string())
+        }
+        Some(2) => {
+            // Error (invalid regex, etc.)
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("Grep error: {}", stderr.trim())
+        }
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("not found") || stderr.contains("No such file") {
+                bail!("ripgrep (rg) is not installed. Install it with: cargo install ripgrep");
+            }
+            bail!("Grep failed: {}", stderr.trim())
+        }
+    }
+}
+
 fn execute_list_files(arguments: &str) -> Result<String> {
     let args: Value = serde_json::from_str(arguments)?;
     let path = args["path"]
@@ -331,6 +445,7 @@ mod tests {
         assert!(Tool::from_name("file_write").is_some());
         assert!(Tool::from_name("list_files").is_some());
         assert!(Tool::from_name("shell_exec").is_some());
+        assert!(Tool::from_name("grep").is_some());
     }
 
     #[test]
@@ -536,5 +651,98 @@ mod tests {
         let args = json!({"command": "echo ok", "timeout_secs": 999}).to_string();
         let result = Tool::ShellExec.execute(&args, dir.path()).await.unwrap();
         assert_eq!(result.trim(), "ok");
+    }
+
+    // --- grep tests ---
+
+    #[tokio::test]
+    async fn grep_matches_found() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("hello.txt"), "hello world\ngoodbye world\nhello again").unwrap();
+
+        let args = json!({"pattern": "hello", "path": dir.path().to_str().unwrap()}).to_string();
+        let result = Tool::Grep.execute(&args, dir.path()).await.unwrap();
+        assert!(result.contains("hello"));
+        assert!(result.contains("hello.txt"));
+    }
+
+    #[tokio::test]
+    async fn grep_no_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("test.txt"), "nothing here").unwrap();
+
+        let args = json!({"pattern": "xyz123", "path": dir.path().to_str().unwrap()}).to_string();
+        let result = Tool::Grep.execute(&args, dir.path()).await.unwrap();
+        assert_eq!(result, "No matches found.");
+    }
+
+    #[tokio::test]
+    async fn grep_invalid_regex() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("test.txt"), "content").unwrap();
+
+        let args = json!({"pattern": "[invalid", "path": dir.path().to_str().unwrap()}).to_string();
+        let result = Tool::Grep.execute(&args, dir.path()).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Grep error"));
+    }
+
+    #[tokio::test]
+    async fn grep_glob_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("code.rs"), "fn main() {}").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "fn notes").unwrap();
+
+        let args = json!({
+            "pattern": "fn",
+            "path": dir.path().to_str().unwrap(),
+            "glob": "*.rs"
+        }).to_string();
+        let result = Tool::Grep.execute(&args, dir.path()).await.unwrap();
+        assert!(result.contains("code.rs"));
+        assert!(!result.contains("notes.txt"));
+    }
+
+    #[tokio::test]
+    async fn grep_case_insensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("test.txt"), "Hello World\nhello world").unwrap();
+
+        let args = json!({
+            "pattern": "HELLO",
+            "path": dir.path().to_str().unwrap(),
+            "case_insensitive": true
+        }).to_string();
+        let result = Tool::Grep.execute(&args, dir.path()).await.unwrap();
+        // Should match both lines
+        assert!(result.contains("Hello"));
+        assert!(result.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn grep_max_results_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let content: String = (0..50).map(|i| format!("match line {i}\n")).collect();
+        std::fs::write(dir.path().join("many.txt"), &content).unwrap();
+
+        let args = json!({
+            "pattern": "match",
+            "path": dir.path().to_str().unwrap(),
+            "max_results": 5
+        }).to_string();
+        let result = Tool::Grep.execute(&args, dir.path()).await.unwrap();
+        let match_lines: Vec<&str> = result.lines().filter(|l| l.contains("match")).collect();
+        assert!(match_lines.len() <= 5);
+    }
+
+    #[tokio::test]
+    async fn grep_defaults_to_project_root() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("root_file.txt"), "findme here").unwrap();
+
+        // No path param — should search project root
+        let args = json!({"pattern": "findme"}).to_string();
+        let result = Tool::Grep.execute(&args, dir.path()).await.unwrap();
+        assert!(result.contains("findme"));
     }
 }
