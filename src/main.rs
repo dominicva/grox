@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
         "model: {}  |  project: {}  |  mode: {}  |  type {} to exit\n",
         model.cyan(),
         project_root.display().to_string().cyan(),
-        format!("{permission_mode:?}").cyan(),
+        format!("{permission_mode}").cyan(),
         "/quit".dimmed()
     );
 

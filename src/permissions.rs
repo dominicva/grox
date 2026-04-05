@@ -12,6 +12,17 @@ pub enum PermissionMode {
     Yolo,
 }
 
+impl std::fmt::Display for PermissionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Default => write!(f, "default (prompt for writes)"),
+            Self::Trust => write!(f, "trust (auto-approve project writes)"),
+            Self::ReadOnly => write!(f, "read-only"),
+            Self::Yolo => write!(f, "yolo (no guardrails)"),
+        }
+    }
+}
+
 /// The tool category determines what permission rules apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolCategory {
