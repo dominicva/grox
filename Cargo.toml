@@ -14,3 +14,6 @@ colored = "3"
 rustyline = "15"
 futures = "0.3"
 dotenvy = "0.15"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,4 +1,5 @@
 mod api;
+mod tools;
 
 use anyhow::{Context, Result};
 use api::{GrokClient, Message};
