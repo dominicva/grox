@@ -133,6 +133,13 @@ impl GrokApi for GrokClient {
                     };
 
                     match event_type {
+                        // Server-side error
+                        "error" => {
+                            let message = parsed.get("message")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("Unknown API error");
+                            bail!("{message}");
+                        }
                         // Streaming text delta
                         "response.output_text.delta" => {
                             if let Some(delta) = parsed.get("delta").and_then(|d| d.as_str()) {
