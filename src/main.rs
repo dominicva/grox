@@ -20,10 +20,14 @@ async fn main() -> Result<()> {
 
     let model = std::env::var("GROX_MODEL").unwrap_or_else(|_| "grok-3-fast".to_string());
 
+    let cwd = std::env::current_dir().context("Failed to get current directory")?;
+    let project_root = util::detect_project_root(&cwd);
+
     println!("{}", "grox — agentic coding with Grok".bold());
     println!(
-        "model: {}  |  type {} to exit\n",
+        "model: {}  |  project: {}  |  type {} to exit\n",
         model.cyan(),
+        project_root.display().to_string().cyan(),
         "/quit".dimmed()
     );
 
@@ -32,14 +36,19 @@ async fn main() -> Result<()> {
 
     let system_prompt = json!({
         "role": "system",
-        "content": "You are Grox, a coding agent powered by Grok. You help developers understand and work with their codebase.
+        "content": format!(
+            "You are Grox, a coding agent powered by Grok. You help developers understand and work with their codebase.
+
+Project root: {}
 
 Rules:
 - Be concise and direct. Lead with the answer, not the process.
 - Do NOT narrate what you are about to do or explain your tool usage. Just use tools silently and respond with findings.
 - Do NOT thank the user for letting you read files — you have autonomous access to tools.
 - When exploring a codebase, use list_files and file_read proactively to gather context before responding.
-- Keep responses short. Use bullet points over paragraphs. Skip preamble."
+- Keep responses short. Use bullet points over paragraphs. Skip preamble.",
+            project_root.display()
+        )
     });
 
     let mut previous_response_id: Option<String> = None;
