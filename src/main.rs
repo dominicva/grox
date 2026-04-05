@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use api::GrokClient;
 use clap::Parser;
 use colored::Colorize;
-use permissions::PermissionMode;
+use permissions::{PermissionMode, SessionPermissions};
 use rustyline::DefaultEditor;
 use serde_json::json;
 use std::io::{Write, stdout};
@@ -75,6 +75,8 @@ async fn main() -> Result<()> {
         format!("{permission_mode:?}").cyan(),
         "/quit".dimmed()
     );
+
+    let mut session_perms = SessionPermissions::new(permission_mode, project_root.clone());
 
     let client = GrokClient::new(api_key, model);
     let agent = Agent::new(&client, &project_root);
@@ -150,10 +152,11 @@ Rules:
                     let _ = stdout().flush();
                 },
                 &mut |_name: &str, output: &str| {
-                    let is_error = output.starts_with("Error:") || output.starts_with("File '");
+                    let is_error = output.starts_with("Error:")
+                        || output.starts_with("File '")
+                        || output.starts_with("Permission denied");
                     let lines: Vec<&str> = output.lines().collect();
                     let summary = if is_error {
-                        // Show the error inline so user can see what happened
                         let msg = output.lines().next().unwrap_or(output);
                         format!("  {} {}", "✗".red(), msg)
                     } else if lines.len() > 5 {
@@ -164,6 +167,9 @@ Rules:
                         format!("  {} ({} bytes)", "✓".green(), output.len())
                     };
                     println!("{}", summary.dimmed());
+                },
+                &mut |name: &str, args: &str| -> bool {
+                    session_perms.authorize(name, args)
                 },
             )
             .await

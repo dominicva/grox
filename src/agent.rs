@@ -25,6 +25,9 @@ impl<'a> Agent<'a> {
 
     /// Run the agent loop for a single user message.
     /// Returns the final text response and optional response_id for continuation.
+    ///
+    /// `on_authorize` is called before executing each tool. It receives the tool name
+    /// and arguments, and returns true if the tool should be executed.
     pub async fn run(
         &self,
         input: Vec<Value>,
@@ -32,6 +35,7 @@ impl<'a> Agent<'a> {
         on_token: &mut (dyn FnMut(String) + Send),
         on_tool_call: &mut (dyn FnMut(&str, &str) + Send),
         on_tool_result: &mut (dyn FnMut(&str, &str) + Send),
+        on_authorize: &mut (dyn FnMut(&str, &str) -> bool + Send),
     ) -> Result<AgentResult> {
         let mut current_input = input;
         let mut current_response_id = previous_response_id.map(String::from);
@@ -65,12 +69,17 @@ impl<'a> Agent<'a> {
             for tc in &response.tool_calls {
                 on_tool_call(&tc.name, &tc.arguments);
 
-                let output = match Tool::from_name(&tc.name) {
-                    Some(tool) => match tool.execute(&tc.arguments, &self.project_root) {
-                        Ok(result) => result,
-                        Err(e) => format!("Error: {e}"),
-                    },
-                    None => format!("Unknown tool: {}", tc.name),
+                // Check permission before executing
+                let output = if !on_authorize(&tc.name, &tc.arguments) {
+                    "Permission denied by user".to_string()
+                } else {
+                    match Tool::from_name(&tc.name) {
+                        Some(tool) => match tool.execute(&tc.arguments, &self.project_root) {
+                            Ok(result) => result,
+                            Err(e) => format!("Error: {e}"),
+                        },
+                        None => format!("Unknown tool: {}", tc.name),
+                    }
                 };
 
                 on_tool_result(&tc.name, &output);
@@ -111,11 +120,10 @@ mod tests {
     fn noop_token(_: String) {}
     fn noop_tool_call(_: &str, _: &str) {}
     fn noop_tool_result(_: &str, _: &str) {}
+    fn allow_all(_: &str, _: &str) -> bool { true }
 
     #[tokio::test]
     async fn single_tool_call_round_trip() {
-        // Turn 1: model calls file_read
-        // Turn 2: model responds with text after seeing file contents
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::io::Write::write_all(&mut &tmp, b"fn main() {}").unwrap();
         let path = tmp.path().to_str().unwrap();
@@ -143,7 +151,7 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "read the file"})];
 
         let result = agent
-            .run(input, None, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result)
+            .run(input, None, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all)
             .await
             .unwrap();
 
@@ -153,8 +161,6 @@ mod tests {
 
     #[tokio::test]
     async fn tool_error_returned_to_model() {
-        // Turn 1: model tries to read a nonexistent file
-        // Turn 2: model responds gracefully after seeing the error
         let mock = MockGrokApi::new(vec![
             TurnResponse {
                 text: String::new(),
@@ -178,7 +184,7 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "read /nonexistent/file.rs"})];
 
         let result = agent
-            .run(input, None, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result)
+            .run(input, None, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all)
             .await
             .unwrap();
 
@@ -198,7 +204,7 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "hello"})];
 
         let result = agent
-            .run(input, None, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result)
+            .run(input, None, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all)
             .await
             .unwrap();
 
@@ -207,7 +213,6 @@ mod tests {
 
     #[tokio::test]
     async fn max_turns_stops_loop() {
-        // Every turn returns a tool call — should stop at MAX_TURNS
         let responses: Vec<TurnResponse> = (0..MAX_TURNS)
             .map(|i| TurnResponse {
                 text: String::new(),
@@ -226,11 +231,10 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "loop forever"})];
 
         let result = agent
-            .run(input, None, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result)
+            .run(input, None, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all)
             .await
             .unwrap();
 
-        // Should have stopped after MAX_TURNS without panicking
         assert!(result.text.is_empty());
     }
 
@@ -259,10 +263,44 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "use a fake tool"})];
 
         let result = agent
-            .run(input, None, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result)
+            .run(input, None, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all)
             .await
             .unwrap();
 
         assert_eq!(result.text, "I don't have that tool.");
+    }
+
+    #[tokio::test]
+    async fn permission_denied_returns_message_to_model() {
+        let mock = MockGrokApi::new(vec![
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_1".into(),
+                    name: "file_write".into(),
+                    arguments: r#"{"path": "/tmp/test.txt", "content": "hello"}"#.into(),
+                }],
+                usage: None,
+                response_id: Some("resp_1".into()),
+            },
+            TurnResponse {
+                text: "Write was denied.".into(),
+                tool_calls: vec![],
+                usage: None,
+                response_id: Some("resp_2".into()),
+            },
+        ]);
+
+        let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
+        let input = vec![json!({"role": "user", "content": "write a file"})];
+
+        let mut deny_all = |_: &str, _: &str| -> bool { false };
+
+        let result = agent
+            .run(input, None, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut deny_all)
+            .await
+            .unwrap();
+
+        assert_eq!(result.text, "Write was denied.");
     }
 }
