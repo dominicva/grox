@@ -69,12 +69,18 @@ async fn main() -> Result<()> {
 
     println!("{}", "grox — agentic coding with Grok".bold());
     println!(
-        "model: {}  |  project: {}  |  mode: {}  |  type {} to exit\n",
+        "model: {}  |  project: {}  |  mode: {}  |  type {} to exit",
         model.cyan(),
         project_root.display().to_string().cyan(),
         format!("{permission_mode}").cyan(),
         "/quit".dimmed()
     );
+    println!(
+        "{}",
+        "note: grox can read any file on your system. File contents are sent to xAI and stored for 30 days."
+            .dimmed()
+    );
+    println!();
 
     let mut session_perms = SessionPermissions::new(permission_mode, project_root.clone());
 
