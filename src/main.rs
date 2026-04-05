@@ -2,14 +2,14 @@ mod api;
 mod tools;
 
 use anyhow::{Context, Result};
-use api::{GrokClient, Message};
+use api::GrokClient;
 use colored::Colorize;
 use rustyline::DefaultEditor;
+use serde_json::json;
 use std::io::{Write, stdout};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Load .env file if present (silently ignored if missing)
     let _ = dotenvy::dotenv();
 
     let api_key =
@@ -26,12 +26,12 @@ async fn main() -> Result<()> {
 
     let client = GrokClient::new(api_key, model);
 
-    let mut messages: Vec<Message> = vec![Message {
-        role: "system".to_string(),
-        content: "You are Grox, a coding assistant powered by Grok. Be concise and helpful."
-            .to_string(),
-    }];
+    let system_prompt = json!({
+        "role": "system",
+        "content": "You are Grox, a coding assistant powered by Grok. Be concise and helpful."
+    });
 
+    let mut previous_response_id: Option<String> = None;
     let mut rl = DefaultEditor::new()?;
 
     loop {
@@ -54,27 +54,32 @@ async fn main() -> Result<()> {
 
         rl.add_history_entry(&input)?;
 
-        messages.push(Message {
-            role: "user".to_string(),
-            content: input,
-        });
+        // Build input array for Responses API
+        let mut api_input = vec![system_prompt.clone()];
+        api_input.push(json!({
+            "role": "user",
+            "content": input,
+        }));
 
         print!("\n{} ", "grok:".magenta().bold());
         stdout().flush()?;
 
+        use api::GrokApi;
         match client
-            .stream_chat(&messages, |token| {
-                print!("{token}");
-                let _ = stdout().flush();
-            })
+            .send_turn(
+                api_input,
+                &[],
+                previous_response_id.as_deref(),
+                &mut |token: String| {
+                    print!("{token}");
+                    let _ = stdout().flush();
+                },
+            )
             .await
         {
             Ok(response) => {
                 println!("\n");
-                messages.push(Message {
-                    role: "assistant".to_string(),
-                    content: response,
-                });
+                previous_response_id = response.response_id;
             }
             Err(e) => {
                 eprintln!("\n{} {e}\n", "error:".red().bold());
