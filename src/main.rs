@@ -1,33 +1,78 @@
 mod agent;
 mod api;
+mod permissions;
 mod tools;
 mod util;
 
 use agent::Agent;
 use anyhow::{Context, Result};
 use api::GrokClient;
+use clap::Parser;
 use colored::Colorize;
+use permissions::PermissionMode;
 use rustyline::DefaultEditor;
 use serde_json::json;
 use std::io::{Write, stdout};
 
+#[derive(Parser)]
+#[command(name = "grox", about = "Agentic coding with Grok")]
+struct Cli {
+    /// Model name (overrides GROX_MODEL env var)
+    #[arg(long)]
+    model: Option<String>,
+
+    /// Print raw SSE events to stderr
+    #[arg(long)]
+    verbose: bool,
+
+    /// Auto-approve writes inside the project root
+    #[arg(long, conflicts_with_all = ["read_only", "yolo"])]
+    auto_approve_writes: bool,
+
+    /// Read-only mode: deny all writes and shell execution
+    #[arg(long, conflicts_with_all = ["auto_approve_writes", "yolo"])]
+    read_only: bool,
+
+    /// YOLO mode: auto-approve everything, including destructive commands
+    #[arg(long, conflicts_with_all = ["auto_approve_writes", "read_only"])]
+    yolo: bool,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
+    let cli = Cli::parse();
 
     let api_key =
         std::env::var("XAI_API_KEY").context("XAI_API_KEY environment variable not set")?;
 
-    let model = std::env::var("GROX_MODEL").unwrap_or_else(|_| "grok-3-fast".to_string());
+    let model = cli.model
+        .unwrap_or_else(|| std::env::var("GROX_MODEL").unwrap_or_else(|_| "grok-3-fast".to_string()));
+
+    if cli.verbose {
+        // SAFETY: called once at startup before any threads are spawned
+        unsafe { std::env::set_var("GROX_VERBOSE", "1") };
+    }
+
+    let permission_mode = if cli.yolo {
+        PermissionMode::Yolo
+    } else if cli.read_only {
+        PermissionMode::ReadOnly
+    } else if cli.auto_approve_writes {
+        PermissionMode::Trust
+    } else {
+        PermissionMode::Default
+    };
 
     let cwd = std::env::current_dir().context("Failed to get current directory")?;
     let project_root = util::detect_project_root(&cwd);
 
     println!("{}", "grox — agentic coding with Grok".bold());
     println!(
-        "model: {}  |  project: {}  |  type {} to exit\n",
+        "model: {}  |  project: {}  |  mode: {}  |  type {} to exit\n",
         model.cyan(),
         project_root.display().to_string().cyan(),
+        format!("{permission_mode:?}").cyan(),
         "/quit".dimmed()
     );
 
