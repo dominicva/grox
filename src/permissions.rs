@@ -376,6 +376,44 @@ mod tests {
         assert!(matches!(check, PermissionCheck::Prompt { allow_always: false, .. }));
     }
 
+    #[test]
+    fn trust_prompts_for_normal_shell() {
+        let p = perms(PermissionMode::Trust);
+        let check = p.check("shell_exec", r#"{"command":"cargo build"}"#);
+        assert!(matches!(check, PermissionCheck::Prompt { allow_always: true, .. }));
+    }
+
+    #[test]
+    fn readonly_denies_shell() {
+        let p = perms(PermissionMode::ReadOnly);
+        assert_eq!(p.check("shell_exec", r#"{"command":"ls"}"#), PermissionCheck::Deny);
+        assert_eq!(p.check("shell_exec", r#"{"command":"rm -rf /"}"#), PermissionCheck::Deny);
+    }
+
+    #[test]
+    fn yolo_allows_destructive_shell() {
+        let p = perms(PermissionMode::Yolo);
+        assert_eq!(p.check("shell_exec", r#"{"command":"rm -rf /"}"#), PermissionCheck::Allow);
+    }
+
+    #[test]
+    fn always_grant_applies_to_shell_cwd() {
+        let dir = tempdir().unwrap();
+        let mut p = perms_with_root(PermissionMode::Default, dir.path().to_path_buf());
+
+        // Shell without cwd uses project root as target dir
+        let args = r#"{"command":"ls"}"#;
+        assert!(matches!(p.check("shell_exec", args), PermissionCheck::Prompt { .. }));
+
+        // Grant "always" for project root
+        p.grant_always(dir.path().to_path_buf());
+        assert_eq!(p.check("shell_exec", args), PermissionCheck::Allow);
+
+        // Destructive still prompts even with always grant
+        let destructive = r#"{"command":"rm -rf /tmp"}"#;
+        assert!(matches!(p.check("shell_exec", destructive), PermissionCheck::Prompt { allow_always: false, .. }));
+    }
+
     // --- "Always" grants ---
 
     #[test]
