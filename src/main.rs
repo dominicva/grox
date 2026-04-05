@@ -1,6 +1,7 @@
 mod agent;
 mod api;
 mod tools;
+mod util;
 
 use agent::Agent;
 use anyhow::{Context, Result};
