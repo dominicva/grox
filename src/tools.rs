@@ -13,12 +13,6 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct ToolResult {
-    pub call_id: String,
-    pub output: String,
-}
-
 impl Tool {
     pub fn all() -> Vec<Tool> {
         vec![Tool::FileRead]

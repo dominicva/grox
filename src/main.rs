@@ -2,6 +2,7 @@ mod agent;
 mod api;
 mod tools;
 
+use agent::Agent;
 use anyhow::{Context, Result};
 use api::GrokClient;
 use colored::Colorize;
@@ -26,10 +27,11 @@ async fn main() -> Result<()> {
     );
 
     let client = GrokClient::new(api_key, model);
+    let agent = Agent::new(&client);
 
     let system_prompt = json!({
         "role": "system",
-        "content": "You are Grox, a coding assistant powered by Grok. Be concise and helpful."
+        "content": "You are Grox, a coding agent powered by Grok. You have access to tools for reading files. Use them to help the developer understand and work with their codebase. Be concise and helpful."
     });
 
     let mut previous_response_id: Option<String> = None;
@@ -55,32 +57,54 @@ async fn main() -> Result<()> {
 
         rl.add_history_entry(&input)?;
 
-        // Build input array for Responses API
-        let mut api_input = vec![system_prompt.clone()];
-        api_input.push(json!({
-            "role": "user",
-            "content": input,
-        }));
+        let api_input = vec![
+            system_prompt.clone(),
+            json!({
+                "role": "user",
+                "content": input,
+            }),
+        ];
 
-        print!("\n{} ", "grok:".magenta().bold());
-        stdout().flush()?;
+        println!();
 
-        use api::GrokApi;
-        match client
-            .send_turn(
+        match agent
+            .run(
                 api_input,
-                &[],
                 previous_response_id.as_deref(),
                 &mut |token: String| {
                     print!("{token}");
                     let _ = stdout().flush();
                 },
+                &mut |name: &str, args: &str| {
+                    print!("\n  {} {}\n", format!("[{name}]").cyan(), args.dimmed());
+                    let _ = stdout().flush();
+                },
+                &mut |_name: &str, output: &str| {
+                    let display = if output.len() > 500 {
+                        format!("{}...", &output[..500])
+                    } else {
+                        output.to_string()
+                    };
+                    println!("{}", display.dimmed());
+                    print!("\n{} ", "grok:".magenta().bold());
+                    let _ = stdout().flush();
+                },
             )
             .await
         {
-            Ok(response) => {
+            Ok(result) => {
                 println!("\n");
-                previous_response_id = response.response_id;
+                if let Some(usage) = &result.usage {
+                    println!(
+                        "{}",
+                        format!(
+                            "  tokens: {} in / {} out",
+                            usage.input_tokens, usage.output_tokens
+                        )
+                        .dimmed()
+                    );
+                }
+                previous_response_id = result.response_id;
             }
             Err(e) => {
                 eprintln!("\n{} {e}\n", "error:".red().bold());
