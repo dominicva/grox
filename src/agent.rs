@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use anyhow::Result;
 use serde_json::{Value, json};
 
@@ -9,13 +11,15 @@ const MAX_TURNS: usize = 25;
 pub struct Agent<'a> {
     api: &'a dyn GrokApi,
     tool_defs: Vec<Value>,
+    project_root: PathBuf,
 }
 
 impl<'a> Agent<'a> {
-    pub fn new(api: &'a dyn GrokApi) -> Self {
+    pub fn new(api: &'a dyn GrokApi, project_root: &Path) -> Self {
         Self {
             api,
             tool_defs: Tool::definitions(),
+            project_root: project_root.to_path_buf(),
         }
     }
 
@@ -62,7 +66,7 @@ impl<'a> Agent<'a> {
                 on_tool_call(&tc.name, &tc.arguments);
 
                 let output = match Tool::from_name(&tc.name) {
-                    Some(tool) => match tool.execute(&tc.arguments) {
+                    Some(tool) => match tool.execute(&tc.arguments, &self.project_root) {
                         Ok(result) => result,
                         Err(e) => format!("Error: {e}"),
                     },
@@ -135,7 +139,7 @@ mod tests {
             },
         ]);
 
-        let agent = Agent::new(&mock);
+        let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
         let input = vec![json!({"role": "user", "content": "read the file"})];
 
         let result = agent
@@ -170,7 +174,7 @@ mod tests {
             },
         ]);
 
-        let agent = Agent::new(&mock);
+        let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
         let input = vec![json!({"role": "user", "content": "read /nonexistent/file.rs"})];
 
         let result = agent
@@ -190,7 +194,7 @@ mod tests {
             response_id: Some("resp_1".into()),
         }]);
 
-        let agent = Agent::new(&mock);
+        let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
         let input = vec![json!({"role": "user", "content": "hello"})];
 
         let result = agent
@@ -218,7 +222,7 @@ mod tests {
             .collect();
 
         let mock = MockGrokApi::new(responses);
-        let agent = Agent::new(&mock);
+        let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
         let input = vec![json!({"role": "user", "content": "loop forever"})];
 
         let result = agent
@@ -251,7 +255,7 @@ mod tests {
             },
         ]);
 
-        let agent = Agent::new(&mock);
+        let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
         let input = vec![json!({"role": "user", "content": "use a fake tool"})];
 
         let result = agent

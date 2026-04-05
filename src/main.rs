@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
     );
 
     let client = GrokClient::new(api_key, model);
-    let agent = Agent::new(&client);
+    let agent = Agent::new(&client, &project_root);
 
     let system_prompt = json!({
         "role": "system",
@@ -203,6 +203,11 @@ fn summarize_tool_call(name: &str, args: &str) -> String {
     match name {
         "file_read" | "list_files" => {
             parsed["path"].as_str().unwrap_or("?").to_string()
+        }
+        "file_write" => {
+            let path = parsed["path"].as_str().unwrap_or("?");
+            let len = parsed["content"].as_str().map(|c| c.len()).unwrap_or(0);
+            format!("{path} ({len} bytes)")
         }
         _ => args.to_string(),
     }
