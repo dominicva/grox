@@ -1,6 +1,8 @@
 use anyhow::Result;
 use serde_json::{Value, json};
 
+use crate::util;
+
 #[derive(Debug, Clone)]
 pub enum Tool {
     FileRead,
@@ -82,8 +84,18 @@ fn execute_file_read(arguments: &str) -> Result<String> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required parameter: path"))?;
 
-    std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("Failed to read file '{}': {}", path, e))
+    // Read as bytes first for binary detection
+    let bytes = std::fs::read(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read file '{}': {}", path, e))?;
+
+    if util::is_binary(&bytes) {
+        anyhow::bail!("File '{}' appears to be binary — cannot display contents", path);
+    }
+
+    let content = String::from_utf8(bytes)
+        .map_err(|_| anyhow::anyhow!("File '{}' contains invalid UTF-8", path))?;
+
+    Ok(util::clip_for_model(&content))
 }
 
 fn execute_list_files(arguments: &str) -> Result<String> {
@@ -161,6 +173,32 @@ mod tests {
             assert_eq!(def["type"], "function");
             assert!(def["parameters"].is_object());
         }
+    }
+
+    #[test]
+    fn file_read_binary_rejected() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        // Write bytes with null in them
+        Write::write_all(&mut tmp, &[0x89, 0x50, 0x4E, 0x47, 0x00, 0x00]).unwrap();
+        let path = tmp.path().to_str().unwrap();
+
+        let args = json!({"path": path}).to_string();
+        let result = Tool::FileRead.execute(&args);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("binary"));
+    }
+
+    #[test]
+    fn file_read_large_file_clipped() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        let content = "x".repeat(50_000);
+        Write::write_all(&mut tmp, content.as_bytes()).unwrap();
+        let path = tmp.path().to_str().unwrap();
+
+        let args = json!({"path": path}).to_string();
+        let result = Tool::FileRead.execute(&args).unwrap();
+        assert!(result.len() < content.len());
+        assert!(result.contains("truncated"));
     }
 
     #[test]
