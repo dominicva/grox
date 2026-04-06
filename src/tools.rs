@@ -11,6 +11,7 @@ use crate::util;
 pub enum Tool {
     FileRead,
     FileWrite,
+    FileEdit,
     ListFiles,
     ShellExec,
     Grep,
@@ -25,7 +26,7 @@ pub struct ToolCall {
 
 impl Tool {
     pub fn all() -> Vec<Tool> {
-        vec![Tool::FileRead, Tool::FileWrite, Tool::ListFiles, Tool::ShellExec, Tool::Grep]
+        vec![Tool::FileRead, Tool::FileWrite, Tool::FileEdit, Tool::ListFiles, Tool::ShellExec, Tool::Grep]
     }
 
     pub fn definitions() -> Vec<Value> {
@@ -36,6 +37,7 @@ impl Tool {
         match name {
             "file_read" => Some(Tool::FileRead),
             "file_write" => Some(Tool::FileWrite),
+            "file_edit" => Some(Tool::FileEdit),
             "list_files" => Some(Tool::ListFiles),
             "shell_exec" => Some(Tool::ShellExec),
             "grep" => Some(Tool::Grep),
@@ -78,6 +80,30 @@ impl Tool {
                         }
                     },
                     "required": ["path", "content"],
+                    "additionalProperties": false
+                }
+            }),
+            Tool::FileEdit => json!({
+                "type": "function",
+                "name": "file_edit",
+                "description": "Edit a file by replacing a single occurrence of a string. The old_string must match exactly one location in the file. If it matches zero or multiple locations, the edit fails with an error. Use this for surgical edits — include enough surrounding context in old_string to ensure a unique match.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "The path to the file to edit"
+                        },
+                        "old_string": {
+                            "type": "string",
+                            "description": "The exact string to find and replace (must match exactly once)"
+                        },
+                        "new_string": {
+                            "type": "string",
+                            "description": "The replacement string"
+                        }
+                    },
+                    "required": ["path", "old_string", "new_string"],
                     "additionalProperties": false
                 }
             }),
@@ -160,6 +186,7 @@ impl Tool {
         match self {
             Tool::FileRead => execute_file_read(arguments),
             Tool::FileWrite => execute_file_write(arguments, project_root),
+            Tool::FileEdit => execute_file_edit(arguments, project_root),
             Tool::ListFiles => execute_list_files(arguments),
             Tool::ShellExec => execute_shell_exec(arguments, project_root).await,
             Tool::Grep => execute_grep(arguments, project_root).await,
@@ -233,6 +260,98 @@ fn execute_file_write(arguments: &str, project_root: &std::path::Path) -> Result
         .map_err(|e| anyhow::anyhow!("Failed to write file '{}': {}", path, e))?;
 
     Ok(format!("Wrote {} bytes to {}", content.len(), path))
+}
+
+fn execute_file_edit(arguments: &str, project_root: &std::path::Path) -> Result<String> {
+    let args: Value = serde_json::from_str(arguments)?;
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing required parameter: path"))?;
+    let old_string = args["old_string"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing required parameter: old_string"))?;
+    let new_string = args["new_string"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing required parameter: new_string"))?;
+
+    if old_string.is_empty() {
+        bail!("old_string must not be empty");
+    }
+
+    if old_string == new_string {
+        bail!("old_string and new_string are identical — nothing to change");
+    }
+
+    let target = std::path::Path::new(path);
+    let resolved = util::validate_path(target, project_root)?;
+
+    // Read as bytes first for binary detection
+    let bytes = std::fs::read(&resolved)
+        .map_err(|e| anyhow::anyhow!("Failed to read file '{}': {}", path, e))?;
+
+    if util::is_binary(&bytes) {
+        bail!("File '{}' appears to be binary — cannot edit", path);
+    }
+
+    let content = String::from_utf8(bytes)
+        .map_err(|_| anyhow::anyhow!("File '{}' contains invalid UTF-8", path))?;
+
+    let count = content.matches(old_string).count();
+
+    if count == 0 {
+        bail!("old_string not found in '{}'", path);
+    }
+
+    if count > 1 {
+        bail!(
+            "old_string matches {} locations in '{}' — provide more context to match exactly once",
+            count,
+            path
+        );
+    }
+
+    let new_content = content.replacen(old_string, new_string, 1);
+    std::fs::write(&resolved, &new_content)
+        .map_err(|e| anyhow::anyhow!("Failed to write file '{}': {}", path, e))?;
+
+    // Return a few lines of surrounding context
+    let replacement_start = content.find(old_string).unwrap();
+    let byte_offset_in_new = replacement_start;
+    let context_snippet = extract_edit_context(&new_content, byte_offset_in_new, new_string.len());
+
+    Ok(format!("Edited {}\n\n{}", path, context_snippet))
+}
+
+/// Extract a few lines of context around the edited region.
+fn extract_edit_context(content: &str, byte_offset: usize, replacement_len: usize) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let context_lines = 3;
+
+    // Find which line the edit starts and ends on
+    let mut byte_pos = 0;
+    let mut start_line = 0;
+    let mut end_line = 0;
+    for (i, line) in lines.iter().enumerate() {
+        let line_end = byte_pos + line.len() + 1; // +1 for newline
+        if byte_pos <= byte_offset && byte_offset < line_end {
+            start_line = i;
+        }
+        if byte_pos <= byte_offset + replacement_len && byte_offset + replacement_len <= line_end {
+            end_line = i;
+            break;
+        }
+        byte_pos = line_end;
+    }
+
+    let from = start_line.saturating_sub(context_lines);
+    let to = (end_line + context_lines + 1).min(lines.len());
+
+    lines[from..to]
+        .iter()
+        .enumerate()
+        .map(|(i, line)| format!("{:>4} | {}", from + i + 1, line))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 async fn execute_shell_exec(arguments: &str, project_root: &Path) -> Result<String> {
@@ -443,6 +562,7 @@ mod tests {
     fn from_name_known() {
         assert!(Tool::from_name("file_read").is_some());
         assert!(Tool::from_name("file_write").is_some());
+        assert!(Tool::from_name("file_edit").is_some());
         assert!(Tool::from_name("list_files").is_some());
         assert!(Tool::from_name("shell_exec").is_some());
         assert!(Tool::from_name("grep").is_some());
@@ -534,6 +654,187 @@ mod tests {
         }).to_string();
 
         let result = Tool::FileWrite.execute(&args, dir.path()).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("outside the project root"));
+    }
+
+    // --- file_edit tests ---
+
+    #[tokio::test]
+    async fn file_edit_single_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "hello world").unwrap();
+
+        let args = json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "hello",
+            "new_string": "goodbye"
+        }).to_string();
+
+        let result = Tool::FileEdit.execute(&args, dir.path()).await.unwrap();
+        assert!(result.contains("Edited"));
+        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "goodbye world");
+    }
+
+    #[tokio::test]
+    async fn file_edit_returns_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        let content = "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\n";
+        std::fs::write(&file_path, content).unwrap();
+
+        let args = json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "line 4",
+            "new_string": "LINE FOUR"
+        }).to_string();
+
+        let result = Tool::FileEdit.execute(&args, dir.path()).await.unwrap();
+        assert!(result.contains("LINE FOUR"));
+        // Should show surrounding lines
+        assert!(result.contains("line 2") || result.contains("line 3"));
+    }
+
+    #[tokio::test]
+    async fn file_edit_zero_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "hello world").unwrap();
+
+        let args = json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "nonexistent",
+            "new_string": "replacement"
+        }).to_string();
+
+        let result = Tool::FileEdit.execute(&args, dir.path()).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn file_edit_multiple_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "hello hello hello").unwrap();
+
+        let args = json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "hello",
+            "new_string": "goodbye"
+        }).to_string();
+
+        let result = Tool::FileEdit.execute(&args, dir.path()).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("3 locations"));
+        // File should be unchanged
+        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "hello hello hello");
+    }
+
+    #[tokio::test]
+    async fn file_edit_empty_old_string() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "hello").unwrap();
+
+        let args = json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "",
+            "new_string": "x"
+        }).to_string();
+
+        let result = Tool::FileEdit.execute(&args, dir.path()).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn file_edit_identical_strings() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "hello").unwrap();
+
+        let args = json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "hello",
+            "new_string": "hello"
+        }).to_string();
+
+        let result = Tool::FileEdit.execute(&args, dir.path()).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("identical"));
+    }
+
+    #[tokio::test]
+    async fn file_edit_file_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("nonexistent.txt");
+
+        let args = json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "hello",
+            "new_string": "goodbye"
+        }).to_string();
+
+        let result = Tool::FileEdit.execute(&args, dir.path()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn file_edit_binary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("binary.bin");
+        std::fs::write(&file_path, &[0x89, 0x50, 0x4E, 0x47, 0x00, 0x00]).unwrap();
+
+        let args = json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "PNG",
+            "new_string": "JPG"
+        }).to_string();
+
+        let result = Tool::FileEdit.execute(&args, dir.path()).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("binary"));
+    }
+
+    #[tokio::test]
+    async fn file_edit_outside_project_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let file_path = outside.path().join("escape.txt");
+        std::fs::write(&file_path, "secret").unwrap();
+
+        let args = json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "secret",
+            "new_string": "safe"
+        }).to_string();
+
+        let result = Tool::FileEdit.execute(&args, dir.path()).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("outside the project root"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_edit_rejects_symlink_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("target.txt");
+        std::fs::write(&outside_file, "secret data").unwrap();
+
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&outside_file, &link).unwrap();
+
+        let args = json!({
+            "path": link.to_str().unwrap(),
+            "old_string": "secret",
+            "new_string": "safe"
+        }).to_string();
+
+        let result = Tool::FileEdit.execute(&args, dir.path()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("outside the project root"));
     }
