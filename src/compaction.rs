@@ -267,13 +267,16 @@ async fn single_summarize(
 ///
 /// First pass: summarize the older half of the entries.
 /// Second pass: combine the first summary with the newer half.
+///
+/// Splits at the nearest UserMessage boundary to the midpoint so that
+/// turns are never bisected (avoiding orphaned ToolCall/ToolResult pairs).
 async fn chunked_summarize(
     entries: &[TranscriptEntry],
     api: &dyn GrokApi,
 ) -> Result<(String, Option<crate::api::Usage>)> {
-    let midpoint = entries.len() / 2;
-    let older_half = &entries[..midpoint];
-    let newer_half = &entries[midpoint..];
+    let split = find_turn_boundary_near_midpoint(entries);
+    let older_half = &entries[..split];
+    let newer_half = &entries[split..];
 
     // First pass: summarize the older half
     let (first_summary, first_usage) = single_summarize(older_half, api).await?;
@@ -302,6 +305,33 @@ async fn chunked_summarize(
     };
 
     Ok((second_response.text, combined_usage))
+}
+
+/// Find the UserMessage boundary nearest to the midpoint of entries.
+///
+/// Used by chunked summarization to split at a turn boundary rather than
+/// at an arbitrary entry index, preventing orphaned ToolCall/ToolResult pairs.
+/// Falls back to raw midpoint if no UserMessage is found.
+fn find_turn_boundary_near_midpoint(entries: &[TranscriptEntry]) -> usize {
+    let midpoint = entries.len() / 2;
+
+    // Collect indices of all UserMessage entries
+    let user_indices: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e, TranscriptEntry::UserMessage { .. }))
+        .map(|(i, _)| i)
+        .collect();
+
+    if user_indices.is_empty() {
+        return midpoint;
+    }
+
+    // Find the UserMessage index closest to the midpoint
+    *user_indices
+        .iter()
+        .min_by_key(|&&idx| (idx as isize - midpoint as isize).unsigned_abs())
+        .unwrap()
 }
 
 /// Find the index in `entries` where the recent region begins.
@@ -1318,6 +1348,69 @@ mod tests {
         assert!(!result.compacted, "should reject verbose summary");
         // Usage should still be reported (tokens were consumed)
         assert!(result.llm_usage.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // turn boundary splitting
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn turn_boundary_splits_at_user_message() {
+        // 3 turns = 6 entries. Midpoint is 3.
+        // UserMessages are at indices 0, 2, 4
+        let entries: Vec<TranscriptEntry> = (0..3)
+            .flat_map(|i| simple_turn(&format!("q{i}"), &format!("a{i}")))
+            .collect();
+
+        let split = find_turn_boundary_near_midpoint(&entries);
+        // Nearest UserMessage to midpoint 3 is index 2 or 4 (both distance 1)
+        assert!(
+            matches!(&entries[split], TranscriptEntry::UserMessage { .. }),
+            "split should be at a UserMessage, got index {split}"
+        );
+    }
+
+    #[test]
+    fn turn_boundary_does_not_orphan_tool_calls() {
+        // Turn with tool calls: User, ToolCall, ToolResult, Assistant = 4 entries
+        let mut entries = tool_turn("q0", "file_read", r#"{"path":"a.rs"}"#, "c0", "content", "a0");
+        entries.extend(simple_turn("q1", "a1"));
+        entries.extend(simple_turn("q2", "a2"));
+        // 8 entries total. Midpoint is 4. UserMessages at indices 0, 4, 6.
+        // Index 4 is a UserMessage (start of turn q1) — should split there.
+        let split = find_turn_boundary_near_midpoint(&entries);
+        assert!(
+            matches!(&entries[split], TranscriptEntry::UserMessage { .. }),
+            "split at {split} should be a UserMessage"
+        );
+        // Verify neither half has an orphaned ToolCall without its ToolResult
+        let older = &entries[..split];
+        let newer = &entries[split..];
+        for half in [older, newer] {
+            let calls: Vec<&str> = half.iter().filter_map(|e| match e {
+                TranscriptEntry::ToolCall { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            }).collect();
+            let results: Vec<&str> = half.iter().filter_map(|e| match e {
+                TranscriptEntry::ToolResult { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            }).collect();
+            for call_id in &calls {
+                assert!(results.contains(call_id), "orphaned ToolCall {call_id}");
+            }
+        }
+    }
+
+    #[test]
+    fn turn_boundary_fallback_when_no_user_messages() {
+        let entries = vec![
+            TranscriptEntry::assistant_message("a0"),
+            TranscriptEntry::assistant_message("a1"),
+            TranscriptEntry::assistant_message("a2"),
+            TranscriptEntry::assistant_message("a3"),
+        ];
+        let split = find_turn_boundary_near_midpoint(&entries);
+        assert_eq!(split, 2, "should fall back to raw midpoint");
     }
 
     // -----------------------------------------------------------------------
