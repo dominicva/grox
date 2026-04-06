@@ -212,10 +212,10 @@ async fn main() -> Result<()> {
         }
 
         if input == "/compact" {
-            let result = compaction::heuristic_compact(&history);
+            let result = compaction::heuristic_compact(&history, &project_root);
             if result.compacted {
-                let old_tokens: usize = history.iter().map(|e| e.token_estimate()).sum();
-                let new_tokens: usize = result.entries.iter().map(|e| e.token_estimate()).sum();
+                let old_estimate = assembler.estimate_tokens(&history);
+                let new_estimate = assembler.estimate_tokens(&result.entries);
                 let old_count = history.len();
                 let new_count = result.entries.len();
                 history = result.entries;
@@ -224,7 +224,7 @@ async fn main() -> Result<()> {
                     "{}",
                     format!(
                         "  compacted: {} entries → {} entries, ~{} → ~{} tokens",
-                        old_count, new_count, old_tokens, new_tokens
+                        old_count, new_count, old_estimate, new_estimate
                     )
                     .yellow()
                 );
@@ -245,16 +245,15 @@ async fn main() -> Result<()> {
         let profile = model_profile::ModelProfile::for_model(client.model());
         let estimated = assembler.estimate_tokens(&history);
         if estimated > profile.compaction_threshold() {
-            let result = compaction::heuristic_compact(&history);
+            let result = compaction::heuristic_compact(&history, &project_root);
             if result.compacted {
-                let old_tokens: usize = history.iter().map(|e| e.token_estimate()).sum();
-                let new_tokens: usize = result.entries.iter().map(|e| e.token_estimate()).sum();
+                let new_estimate = assembler.estimate_tokens(&result.entries);
                 history = result.entries;
                 transcript.atomic_rewrite(&history)?;
                 eprintln!(
                     "{}",
                     format!(
-                        "  auto-compacted: ~{old_tokens} → ~{new_tokens} tokens (threshold: {})",
+                        "  auto-compacted: ~{estimated} → ~{new_estimate} tokens (threshold: {})",
                         profile.compaction_threshold()
                     )
                     .yellow()

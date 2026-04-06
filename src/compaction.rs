@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use crate::session::TranscriptEntry;
 
@@ -15,11 +16,14 @@ pub struct CompactionResult {
 
 /// Run heuristic compaction on transcript entries (no LLM call).
 ///
+/// `project_root` is used to normalize file paths so that relative and absolute
+/// references to the same file are correctly deduplicated.
+///
 /// Preserves the last `RECENT_TURNS` user turns verbatim. For older entries:
 /// - Tool result content replaced with short placeholders
 /// - Duplicate file reads removed (only most recent kept)
 /// - Old shell output truncated to first 3 + last 3 lines
-pub fn heuristic_compact(entries: &[TranscriptEntry]) -> CompactionResult {
+pub fn heuristic_compact(entries: &[TranscriptEntry], project_root: &Path) -> CompactionResult {
     let boundary = find_recent_boundary(entries, RECENT_TURNS);
 
     // If everything is recent, nothing to compact
@@ -34,8 +38,8 @@ pub fn heuristic_compact(entries: &[TranscriptEntry]) -> CompactionResult {
     let recent_entries = &entries[boundary..];
 
     // Find the last read of each file path across the entire transcript.
-    // Key: file path, Value: index (in the full entries slice) of the last ToolCall for that path.
-    let last_read_index = find_last_file_read_indices(entries);
+    // Key: normalized file path, Value: index (in the full entries slice) of the last ToolCall.
+    let last_read_index = find_last_file_read_indices(entries, project_root);
 
     // Process old entries
     let mut result = Vec::new();
@@ -47,7 +51,8 @@ pub fn heuristic_compact(entries: &[TranscriptEntry]) -> CompactionResult {
             TranscriptEntry::ToolCall { call_id, name, arguments, .. }
                 if name == "file_read"
                     && extract_path(arguments)
-                        .and_then(|path| last_read_index.get(&path).copied())
+                        .map(|p| normalize_path(&p, project_root))
+                        .and_then(|norm| last_read_index.get(&norm).copied())
                         .is_some_and(|last_idx| last_idx > i) =>
             {
                 // This file_read has a later duplicate — skip both ToolCall and ToolResult
@@ -113,7 +118,8 @@ fn find_recent_boundary(entries: &[TranscriptEntry], recent_turns: usize) -> usi
 }
 
 /// For each file path that was read (via file_read ToolCall), record the index of its last occurrence.
-fn find_last_file_read_indices(entries: &[TranscriptEntry]) -> HashMap<String, usize> {
+/// Paths are normalized so that relative and absolute references to the same file match.
+fn find_last_file_read_indices(entries: &[TranscriptEntry], project_root: &Path) -> HashMap<String, usize> {
     let mut last_read: HashMap<String, usize> = HashMap::new();
 
     for (i, entry) in entries.iter().enumerate() {
@@ -121,11 +127,40 @@ fn find_last_file_read_indices(entries: &[TranscriptEntry]) -> HashMap<String, u
             && name == "file_read"
             && let Some(path) = extract_path(arguments)
         {
-            last_read.insert(path, i);
+            let normalized = normalize_path(&path, project_root);
+            last_read.insert(normalized, i);
         }
     }
 
     last_read
+}
+
+/// Normalize a file path for dedup comparison.
+///
+/// Makes relative paths absolute using `project_root`, then cleans `.` and `..`
+/// components without touching the filesystem. This ensures `src/main.rs` and
+/// `/abs/repo/src/main.rs` resolve to the same key.
+fn normalize_path(raw: &str, project_root: &Path) -> String {
+    let p = PathBuf::from(raw);
+    let absolute = if p.is_absolute() {
+        p
+    } else {
+        project_root.join(p)
+    };
+    clean_path(&absolute).to_string_lossy().into_owned()
+}
+
+/// Lexically clean a path: resolve `.` and `..` components without filesystem access.
+fn clean_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {} // skip `.`
+            std::path::Component::ParentDir => { out.pop(); }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Extract the `path` field from tool call arguments JSON.
@@ -286,7 +321,7 @@ mod tests {
         let entries: Vec<TranscriptEntry> = (0..3)
             .flat_map(|i| simple_turn(&format!("q{i}"), &format!("a{i}")))
             .collect();
-        let result = heuristic_compact(&entries);
+        let result = heuristic_compact(&entries, Path::new("/project"));
         assert!(!result.compacted);
         assert_eq!(result.entries.len(), entries.len());
     }
@@ -310,7 +345,7 @@ mod tests {
             entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
         }
 
-        let result = heuristic_compact(&entries);
+        let result = heuristic_compact(&entries, Path::new("/project"));
         assert!(result.compacted);
 
         // Find the tool result in the compacted entries
@@ -346,7 +381,7 @@ mod tests {
             "a5",
         ));
 
-        let result = heuristic_compact(&entries);
+        let result = heuristic_compact(&entries, Path::new("/project"));
 
         // The recent file_read result should be unchanged
         let recent_result = result.entries.iter().find(|e| {
@@ -387,7 +422,7 @@ mod tests {
             entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
         }
 
-        let result = heuristic_compact(&entries);
+        let result = heuristic_compact(&entries, Path::new("/project"));
         assert!(result.compacted);
 
         // The first read (c0) should be removed
@@ -402,6 +437,77 @@ mod tests {
             matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c1")
         });
         assert!(c1_exists, "most recent file read should be kept");
+    }
+
+    #[test]
+    fn dedup_normalizes_relative_vs_absolute_paths() {
+        // Turn 0: read via relative path (old region)
+        let mut entries = tool_turn(
+            "q0",
+            "file_read",
+            r#"{"path":"src/main.rs"}"#,
+            "c0",
+            "old content",
+            "a0",
+        );
+        // Turn 1: read same file via absolute path (still in old region)
+        entries.extend(tool_turn(
+            "q1",
+            "file_read",
+            r#"{"path":"/project/src/main.rs"}"#,
+            "c1",
+            "newer content",
+            "a1",
+        ));
+        for i in 2..=6 {
+            entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
+        }
+
+        let result = heuristic_compact(&entries, Path::new("/project"));
+        assert!(result.compacted);
+
+        // The relative read (c0) should be removed — it resolves to the same file
+        let c0_exists = result.entries.iter().any(|e| {
+            matches!(e, TranscriptEntry::ToolCall { call_id, .. } if call_id == "c0")
+        });
+        assert!(!c0_exists, "relative path read should be deduped against absolute path");
+
+        // The absolute read (c1) should be kept (most recent)
+        let c1_exists = result.entries.iter().any(|e| {
+            matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c1")
+        });
+        assert!(c1_exists);
+    }
+
+    #[test]
+    fn dedup_normalizes_dot_dot_components() {
+        // Turn 0: read with ../ in path
+        let mut entries = tool_turn(
+            "q0",
+            "file_read",
+            r#"{"path":"src/../src/main.rs"}"#,
+            "c0",
+            "old content",
+            "a0",
+        );
+        // Turn 1: read clean path
+        entries.extend(tool_turn(
+            "q1",
+            "file_read",
+            r#"{"path":"src/main.rs"}"#,
+            "c1",
+            "newer content",
+            "a1",
+        ));
+        for i in 2..=6 {
+            entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
+        }
+
+        let result = heuristic_compact(&entries, Path::new("/project"));
+        let c0_exists = result.entries.iter().any(|e| {
+            matches!(e, TranscriptEntry::ToolCall { call_id, .. } if call_id == "c0")
+        });
+        assert!(!c0_exists, "path with ../ should be deduped against clean path");
     }
 
     #[test]
@@ -429,7 +535,7 @@ mod tests {
             "a5",
         ));
 
-        let result = heuristic_compact(&entries);
+        let result = heuristic_compact(&entries, Path::new("/project"));
         assert!(result.compacted);
 
         // Old read should be removed
@@ -470,7 +576,7 @@ mod tests {
             entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
         }
 
-        let result = heuristic_compact(&entries);
+        let result = heuristic_compact(&entries, Path::new("/project"));
         assert!(result.compacted);
 
         let shell_result = result.entries.iter().find(|e| {
@@ -505,7 +611,7 @@ mod tests {
             entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
         }
 
-        let result = heuristic_compact(&entries);
+        let result = heuristic_compact(&entries, Path::new("/project"));
         // Shell output is short enough — no truncation needed
         let shell_result = result.entries.iter().find(|e| {
             matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c0")
@@ -536,7 +642,7 @@ mod tests {
 
         let original_estimate: usize = entries.iter().map(|e| e.token_estimate()).sum();
 
-        let result = heuristic_compact(&entries);
+        let result = heuristic_compact(&entries, Path::new("/project"));
         let compacted_estimate: usize = result.entries.iter().map(|e| e.token_estimate()).sum();
 
         assert!(
@@ -563,7 +669,7 @@ mod tests {
             entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
         }
 
-        let result = heuristic_compact(&entries);
+        let result = heuristic_compact(&entries, Path::new("/project"));
         let grep_result = result.entries.iter().find(|e| {
             matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c0")
         });
@@ -595,7 +701,7 @@ mod tests {
 
     #[test]
     fn empty_transcript_returns_empty() {
-        let result = heuristic_compact(&[]);
+        let result = heuristic_compact(&[], Path::new("/project"));
         assert!(!result.compacted);
         assert!(result.entries.is_empty());
     }
@@ -635,7 +741,7 @@ mod tests {
         let before = assembler.estimate_tokens(&entries);
         assert!(before > threshold, "setup: should exceed threshold");
 
-        let result = heuristic_compact(&entries);
+        let result = heuristic_compact(&entries, Path::new("/project"));
         assert!(result.compacted);
 
         let after = assembler.estimate_tokens(&result.entries);
@@ -660,7 +766,7 @@ mod tests {
             entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
         }
 
-        let result = heuristic_compact(&entries);
+        let result = heuristic_compact(&entries, Path::new("/project"));
         let tr = result.entries.iter().find(|e| {
             matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c0")
         });
@@ -683,7 +789,7 @@ mod tests {
             entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
         }
 
-        let result = heuristic_compact(&entries);
+        let result = heuristic_compact(&entries, Path::new("/project"));
         let tr = result.entries.iter().find(|e| {
             matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c0")
         });
@@ -711,7 +817,7 @@ mod tests {
             entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
         }
 
-        let result = heuristic_compact(&entries);
+        let result = heuristic_compact(&entries, Path::new("/project"));
         assert!(result.compacted);
 
         // file_read should be placeholder
