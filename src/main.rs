@@ -220,8 +220,8 @@ async fn main() -> Result<()> {
             let after_heuristic = assembler.estimate_tokens(&heuristic.entries);
             let threshold = model_profile::ModelProfile::for_model(client.model()).compaction_threshold();
 
-            // If heuristic wasn't enough, escalate to LLM compaction
-            let result = if heuristic.compacted && after_heuristic > threshold {
+            // If still over threshold after heuristic, escalate to LLM compaction
+            let result = if after_heuristic > threshold {
                 match compaction::llm_compact(&heuristic.entries, client.model(), &client).await {
                     Ok(llm_result) if llm_result.compacted => llm_result,
                     Ok(_) => heuristic,
