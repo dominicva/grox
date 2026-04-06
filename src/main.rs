@@ -99,6 +99,16 @@ async fn main() -> Result<()> {
 
     let mut client = GrokClient::new(api_key, model);
 
+    // Gather repo context
+    let repo_ctx = repo_context::RepoContext::gather(&project_root);
+    if repo_ctx.truncated {
+        eprintln!(
+            "{}",
+            "  warning: repo context exceeds 10K characters and was truncated"
+                .yellow()
+        );
+    }
+
     // Load GROX.md custom instructions if present
     let grox_md = util::load_grox_md(&project_root);
     if let Some(ref content) = grox_md {
@@ -111,8 +121,10 @@ async fn main() -> Result<()> {
         }
     }
 
+    let repo_ctx_text = if repo_ctx.text.is_empty() { None } else { Some(repo_ctx.text.as_str()) };
     let system_content = prompt::build_system_prompt(
         &project_root,
+        repo_ctx_text,
         grox_md.as_deref(),
     );
 

@@ -1,8 +1,12 @@
 use std::path::Path;
 
 /// Build the full system prompt for the Grok model.
-/// Combines the core instructions with optional GROX.md custom instructions.
-pub fn build_system_prompt(project_root: &Path, grox_md: Option<&str>) -> String {
+/// Combines the core instructions with optional repo context and GROX.md custom instructions.
+pub fn build_system_prompt(
+    project_root: &Path,
+    repo_context: Option<&str>,
+    grox_md: Option<&str>,
+) -> String {
     let mut sections = Vec::new();
 
     sections.push(identity_section(project_root));
@@ -10,6 +14,10 @@ pub fn build_system_prompt(project_root: &Path, grox_md: Option<&str>) -> String
     sections.push(working_with_code_section());
     sections.push(taking_action_section());
     sections.push(tools_section());
+
+    if let Some(ctx) = repo_context {
+        sections.push(repo_context_section(ctx));
+    }
 
     if let Some(custom) = grox_md {
         sections.push(project_instructions_section(custom));
@@ -77,6 +85,10 @@ fn tools_section() -> String {
         .to_string()
 }
 
+fn repo_context_section(content: &str) -> String {
+    format!("# Repository context\n\n{content}")
+}
+
 fn project_instructions_section(content: &str) -> String {
     format!("# Project instructions (GROX.md)\n\n{content}")
 }
@@ -88,7 +100,7 @@ mod tests {
 
     #[test]
     fn prompt_contains_all_sections() {
-        let prompt = build_system_prompt(Path::new("/test/project"), None);
+        let prompt = build_system_prompt(Path::new("/test/project"), None, None);
         assert!(prompt.contains("You are Grox"));
         assert!(prompt.contains("# Output style"));
         assert!(prompt.contains("# Working with code"));
@@ -98,26 +110,26 @@ mod tests {
 
     #[test]
     fn prompt_includes_project_root() {
-        let prompt = build_system_prompt(Path::new("/my/project"), None);
+        let prompt = build_system_prompt(Path::new("/my/project"), None, None);
         assert!(prompt.contains("Project root: /my/project"));
     }
 
     #[test]
     fn prompt_excludes_grox_md_when_absent() {
-        let prompt = build_system_prompt(Path::new("/test"), None);
+        let prompt = build_system_prompt(Path::new("/test"), None, None);
         assert!(!prompt.contains("GROX.md"));
     }
 
     #[test]
     fn prompt_includes_grox_md_when_present() {
-        let prompt = build_system_prompt(Path::new("/test"), Some("Always use tabs."));
+        let prompt = build_system_prompt(Path::new("/test"), None, Some("Always use tabs."));
         assert!(prompt.contains("# Project instructions (GROX.md)"));
         assert!(prompt.contains("Always use tabs."));
     }
 
     #[test]
     fn prompt_sections_are_separated_by_blank_lines() {
-        let prompt = build_system_prompt(Path::new("/test"), None);
+        let prompt = build_system_prompt(Path::new("/test"), None, None);
         // Each section should be separated by \n\n
         assert!(prompt.contains("# Output style\n\n"));
         assert!(prompt.contains("# Working with code\n\n"));
@@ -126,7 +138,7 @@ mod tests {
 
     #[test]
     fn prompt_mentions_all_tools() {
-        let prompt = build_system_prompt(Path::new("/test"), None);
+        let prompt = build_system_prompt(Path::new("/test"), None, None);
         assert!(prompt.contains("grep"));
         assert!(prompt.contains("list_files"));
         assert!(prompt.contains("file_read"));
@@ -137,19 +149,44 @@ mod tests {
 
     #[test]
     fn identity_is_first_section() {
-        let prompt = build_system_prompt(Path::new("/test"), None);
+        let prompt = build_system_prompt(Path::new("/test"), None, None);
         assert!(prompt.starts_with("You are Grox"));
     }
 
     #[test]
     fn prompt_emphasizes_reading_before_writing() {
-        let prompt = build_system_prompt(Path::new("/test"), None);
+        let prompt = build_system_prompt(Path::new("/test"), None, None);
         assert!(prompt.contains("Before making changes, build understanding"));
     }
 
     #[test]
+    fn prompt_includes_repo_context_when_provided() {
+        let prompt = build_system_prompt(Path::new("/test"), Some("Branch: main\nStatus: clean"), None);
+        assert!(prompt.contains("# Repository context"));
+        assert!(prompt.contains("Branch: main"));
+    }
+
+    #[test]
+    fn prompt_excludes_repo_context_when_absent() {
+        let prompt = build_system_prompt(Path::new("/test"), None, None);
+        assert!(!prompt.contains("Repository context"));
+    }
+
+    #[test]
+    fn repo_context_before_grox_md() {
+        let prompt = build_system_prompt(
+            Path::new("/test"),
+            Some("Branch: main"),
+            Some("Custom rules."),
+        );
+        let ctx_pos = prompt.find("Repository context").unwrap();
+        let grox_pos = prompt.find("GROX.md").unwrap();
+        assert!(ctx_pos < grox_pos, "repo context should appear before GROX.md");
+    }
+
+    #[test]
     fn grox_md_is_last_section() {
-        let prompt = build_system_prompt(Path::new("/test"), Some("Custom rules."));
+        let prompt = build_system_prompt(Path::new("/test"), None, Some("Custom rules."));
         assert!(prompt.ends_with("Custom rules."));
     }
 }
