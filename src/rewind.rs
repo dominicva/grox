@@ -29,11 +29,6 @@ pub enum RewindMode {
     ConversationOnly,
 }
 
-/// Find the index of the most recent Checkpoint entry in the transcript.
-fn find_last_checkpoint(entries: &[TranscriptEntry]) -> Option<usize> {
-    entries.iter().rposition(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
-}
-
 /// Find the index of the Nth-from-last UserMessage in the transcript.
 /// `n = 1` means the most recent user message, `n = 2` means the one before that, etc.
 fn find_nth_user_message_from_end(entries: &[TranscriptEntry], n: usize) -> Option<usize> {
@@ -64,9 +59,6 @@ pub fn undo_last_turn(
         return Err("no entries to undo".to_string());
     }
 
-    // Find the last checkpoint
-    let checkpoint_idx = find_last_checkpoint(entries);
-
     // Find the last user message — this is where we truncate to (exclusive of everything after)
     let last_user_idx = find_nth_user_message_from_end(entries, 1)
         .ok_or_else(|| "no user messages found".to_string())?;
@@ -87,19 +79,26 @@ pub fn undo_last_turn(
                 "not in a git repo — cannot restore code changes".to_string(),
             );
         }
-        if let Some(cp_idx) = checkpoint_idx {
-            // Only restore if the checkpoint is within the entries being removed
-            if cp_idx >= truncate_to {
-                if let TranscriptEntry::Checkpoint {
-                    snapshots,
-                    has_shell_exec,
-                    ..
-                } = &entries[cp_idx]
-                {
-                    had_shell_exec = *has_shell_exec;
-                    for snapshot in snapshots {
-                        file_results.push(checkpoint::restore_file(snapshot, project_root));
-                    }
+
+        // Collect ALL checkpoints in the removed range (there can be multiple
+        // if the agent made tool calls across several inner iterations).
+        // Restore in reverse order so later edits are undone first.
+        let checkpoints_in_range: Vec<usize> = (truncate_to..entries.len())
+            .filter(|&i| matches!(&entries[i], TranscriptEntry::Checkpoint { .. }))
+            .collect();
+
+        for &cp_idx in checkpoints_in_range.iter().rev() {
+            if let TranscriptEntry::Checkpoint {
+                snapshots,
+                has_shell_exec,
+                ..
+            } = &entries[cp_idx]
+            {
+                if *has_shell_exec {
+                    had_shell_exec = true;
+                }
+                for snapshot in snapshots {
+                    file_results.push(checkpoint::restore_file(snapshot, project_root));
                 }
             }
         }
@@ -425,6 +424,91 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "original");
         assert_eq!(result.entries.len(), entries.len()); // transcript unchanged
         assert_eq!(result.entries_removed, 0);
+    }
+
+    #[test]
+    fn undo_multi_checkpoint_single_turn() {
+        // Simulates a user turn where the model makes tool calls across two
+        // inner iterations, producing two separate Checkpoint entries.
+        let repo = setup_git_repo();
+        let file1 = repo.path().join("a.txt");
+        let file2 = repo.path().join("b.txt");
+
+        std::fs::write(&file1, "a_original").unwrap();
+        let pre1 = checkpoint::git_hash_object(&file1, repo.path()).unwrap();
+        std::fs::write(&file1, "a_modified").unwrap();
+        let post1 = checkpoint::git_hash_object(&file1, repo.path()).unwrap();
+
+        std::fs::write(&file2, "b_original").unwrap();
+        let pre2 = checkpoint::git_hash_object(&file2, repo.path()).unwrap();
+        std::fs::write(&file2, "b_modified").unwrap();
+        let post2 = checkpoint::git_hash_object(&file2, repo.path()).unwrap();
+
+        // One user turn with two checkpoints (two model iterations)
+        let entries = vec![
+            TranscriptEntry::user_message("edit both files"),
+            TranscriptEntry::tool_call("c1", "file_write", r#"{"path":"a.txt"}"#),
+            TranscriptEntry::tool_result("c1", "file_write", "ok"),
+            TranscriptEntry::checkpoint(
+                vec![FileSnapshot {
+                    path: file1.display().to_string(),
+                    pre_hash: pre1,
+                    post_hash: post1,
+                }],
+                false,
+            ),
+            TranscriptEntry::assistant_message("Edited a.txt, now editing b.txt"),
+            TranscriptEntry::tool_call("c2", "file_write", r#"{"path":"b.txt"}"#),
+            TranscriptEntry::tool_result("c2", "file_write", "ok"),
+            TranscriptEntry::checkpoint(
+                vec![FileSnapshot {
+                    path: file2.display().to_string(),
+                    pre_hash: pre2,
+                    post_hash: post2,
+                }],
+                false,
+            ),
+            TranscriptEntry::assistant_message("Done"),
+        ];
+
+        let result = undo_last_turn(&entries, repo.path(), RewindMode::Both).unwrap();
+
+        // Both files should be restored
+        assert_eq!(std::fs::read_to_string(&file1).unwrap(), "a_original");
+        assert_eq!(std::fs::read_to_string(&file2).unwrap(), "b_original");
+        assert_eq!(result.file_results.len(), 2);
+        assert!(result.entries.is_empty()); // no prior turns
+    }
+
+    #[test]
+    fn undo_multi_checkpoint_shell_exec_in_earlier_iteration() {
+        // shell_exec happens in first iteration, file_write in second.
+        // undo should still see the shell_exec warning.
+        let repo = setup_git_repo();
+        let file = repo.path().join("test.txt");
+        std::fs::write(&file, "original").unwrap();
+        let pre = checkpoint::git_hash_object(&file, repo.path()).unwrap();
+        std::fs::write(&file, "modified").unwrap();
+        let post = checkpoint::git_hash_object(&file, repo.path()).unwrap();
+
+        let entries = vec![
+            TranscriptEntry::user_message("do stuff"),
+            // First iteration: shell_exec + file_write
+            TranscriptEntry::tool_call("c1", "file_write", r#"{"path":"test.txt"}"#),
+            TranscriptEntry::tool_result("c1", "file_write", "ok"),
+            TranscriptEntry::checkpoint(
+                vec![FileSnapshot {
+                    path: file.display().to_string(),
+                    pre_hash: pre,
+                    post_hash: post,
+                }],
+                true, // has_shell_exec from this iteration
+            ),
+            TranscriptEntry::assistant_message("Done"),
+        ];
+
+        let result = undo_last_turn(&entries, repo.path(), RewindMode::Both).unwrap();
+        assert!(result.had_shell_exec);
     }
 
     // --- rewind_to_turn ---
