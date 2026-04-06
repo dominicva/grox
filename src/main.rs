@@ -313,6 +313,10 @@ fn summarize_tool_call(name: &str, args: &str) -> String {
             let len = parsed["content"].as_str().map(|c| c.len()).unwrap_or(0);
             format!("{path} ({len} bytes)")
         }
+        "file_edit" => {
+            let path = parsed["path"].as_str().unwrap_or("?");
+            path.to_string()
+        }
         "shell_exec" => {
             let cmd = parsed["command"].as_str().unwrap_or("?");
             let truncated: String = cmd.chars().take(80).collect();
