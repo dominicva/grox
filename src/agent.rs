@@ -62,6 +62,10 @@ impl<'a> Agent<'a> {
         let mut entries: Vec<TranscriptEntry> = Vec::new();
         let mut final_text = String::new();
         let mut cumulative_usage: Option<crate::api::Usage> = None;
+        // Track shell_exec at the user-turn level (across all inner iterations)
+        // so checkpoints always carry the warning regardless of which iteration
+        // the shell_exec happened in.
+        let mut turn_had_shell_exec = false;
 
         for _turn in 0..MAX_TURNS {
             let response = self
@@ -108,7 +112,6 @@ impl<'a> Agent<'a> {
             // Execute tool calls and accumulate into messages
             let mut had_mutation = false;
             let mut snapshots: Vec<FileSnapshot> = Vec::new();
-            let mut had_shell_exec = false;
 
             for tc in &response.tool_calls {
                 on_tool_call(&tc.name, &tc.arguments);
@@ -130,15 +133,19 @@ impl<'a> Agent<'a> {
                     && CHECKPOINTED_TOOLS.contains(&tc.name.as_str());
 
                 // Snapshot file AFTER authorization but BEFORE execution.
-                // Path is validated against project root to prevent reading
-                // out-of-project files via git hash-object.
-                let pre_hash = if is_checkpointed {
+                // Uses validate_checkpoint_path which works for files whose
+                // parent directories don't exist yet (file_write creates them).
+                // Returns the canonical path for consistent dedup.
+                let pre_snapshot = if is_checkpointed {
                     checkpoint::extract_tool_path(&tc.arguments).and_then(|path| {
                         let abs_path =
                             checkpoint::resolve_checkpoint_path(&path, &self.project_root);
-                        // Only snapshot paths inside the project root
-                        crate::util::validate_path(&abs_path, &self.project_root).ok()?;
-                        checkpoint::snapshot_pre(&abs_path, &self.project_root).ok()
+                        let canonical = checkpoint::validate_checkpoint_path(
+                            &abs_path,
+                            &self.project_root,
+                        )?;
+                        let pre = checkpoint::snapshot_pre(&canonical, &self.project_root).ok()?;
+                        Some((canonical, pre))
                     })
                 } else {
                     None
@@ -151,7 +158,8 @@ impl<'a> Agent<'a> {
                         had_mutation = true;
                     }
                     if tc.name == "shell_exec" {
-                        had_shell_exec = true;
+                        // Track at turn level (persisted in turn_had_shell_exec)
+                        turn_had_shell_exec = true;
                     }
                     match Tool::from_name(&tc.name) {
                         Some(tool) => match tool.execute(&tc.arguments, &self.project_root).await {
@@ -163,29 +171,26 @@ impl<'a> Agent<'a> {
                 };
 
                 // Snapshot file after modification (checkpoint).
+                // Uses the canonical path from pre-snapshot for consistent dedup.
                 // If the same file was already edited in this batch, update
                 // the existing snapshot's post_hash (keeping the original
                 // pre_hash so undo restores to the true start-of-turn state).
-                if let Some(pre) = pre_hash {
-                    if let Some(path) = checkpoint::extract_tool_path(&tc.arguments) {
-                        let abs_path =
-                            checkpoint::resolve_checkpoint_path(&path, &self.project_root);
-                        if let Ok(post) =
-                            checkpoint::snapshot_post(&abs_path, &self.project_root)
+                if let Some((canonical, pre)) = pre_snapshot {
+                    if let Ok(post) =
+                        checkpoint::snapshot_post(&canonical, &self.project_root)
+                    {
+                        let path_str = canonical.display().to_string();
+                        if let Some(existing) =
+                            snapshots.iter_mut().find(|s| s.path == path_str)
                         {
-                            let path_str = abs_path.display().to_string();
-                            if let Some(existing) =
-                                snapshots.iter_mut().find(|s| s.path == path_str)
-                            {
-                                // Keep first pre_hash, update to latest post_hash
-                                existing.post_hash = post;
-                            } else {
-                                snapshots.push(FileSnapshot {
-                                    path: path_str,
-                                    pre_hash: pre,
-                                    post_hash: post,
-                                });
-                            }
+                            // Keep first pre_hash, update to latest post_hash
+                            existing.post_hash = post;
+                        } else {
+                            snapshots.push(FileSnapshot {
+                                path: path_str,
+                                pre_hash: pre,
+                                post_hash: post,
+                            });
                         }
                     }
                 }
@@ -202,9 +207,11 @@ impl<'a> Agent<'a> {
                 entries.push(tr_entry);
             }
 
-            // Record checkpoint if any files were modified
+            // Record checkpoint if any files were modified.
+            // had_shell_exec is tracked at the turn level (across all iterations)
+            // so the warning covers shell_exec in any iteration, not just this one.
             if !snapshots.is_empty() {
-                entries.push(TranscriptEntry::checkpoint(snapshots, had_shell_exec));
+                entries.push(TranscriptEntry::checkpoint(snapshots, turn_had_shell_exec));
             }
 
             // Refresh system prompt after mutating tools so the next iteration
@@ -1009,6 +1016,172 @@ mod tests {
 
         if let TranscriptEntry::Checkpoint { has_shell_exec, .. } = &checkpoint_entries[0] {
             assert!(has_shell_exec, "should flag shell_exec in mixed turn");
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_new_file_in_new_directory() {
+        let repo = setup_git_repo();
+        // File in a directory that doesn't exist yet
+        let file_path = repo.path().join("new_dir").join("nested").join("file.txt");
+
+        let mock = MockGrokApi::new(vec![
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_1".into(),
+                    name: "file_write".into(),
+                    arguments: format!(r#"{{"path": "{}", "content": "hello"}}"#, file_path.display()),
+                }],
+                usage: None,
+            },
+            TurnResponse {
+                text: "Created.".into(),
+                tool_calls: vec![],
+                usage: None,
+            },
+        ]);
+
+        let agent = Agent::new(&mock, repo.path());
+        let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "create"})];
+
+        let result = agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+            .await
+            .unwrap();
+
+        let checkpoint_entries: Vec<_> = result.entries.iter()
+            .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
+            .collect();
+        assert_eq!(checkpoint_entries.len(), 1, "new file in new dir should be checkpointed");
+
+        if let TranscriptEntry::Checkpoint { snapshots, .. } = &checkpoint_entries[0] {
+            assert_eq!(snapshots.len(), 1);
+            assert_eq!(snapshots[0].pre_hash, checkpoint::CREATED_SENTINEL);
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_exec_warning_across_iterations() {
+        // Iteration 1: shell_exec only (no checkpoint emitted)
+        // Iteration 2: file_write (checkpoint emitted)
+        // The checkpoint should carry has_shell_exec = true
+        let repo = setup_git_repo();
+        let file_path = repo.path().join("test.txt");
+
+        let mock = MockGrokApi::new(vec![
+            // Iteration 1: shell_exec only
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_1".into(),
+                    name: "shell_exec".into(),
+                    arguments: r#"{"command": "echo hi"}"#.into(),
+                }],
+                usage: None,
+            },
+            // Iteration 2: file_write
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_2".into(),
+                    name: "file_write".into(),
+                    arguments: format!(r#"{{"path": "{}", "content": "data"}}"#, file_path.display()),
+                }],
+                usage: None,
+            },
+            TurnResponse {
+                text: "Done.".into(),
+                tool_calls: vec![],
+                usage: None,
+            },
+        ]);
+
+        let agent = Agent::new(&mock, repo.path());
+        let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "go"})];
+
+        let result = agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+            .await
+            .unwrap();
+
+        let checkpoint_entries: Vec<_> = result.entries.iter()
+            .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
+            .collect();
+        assert_eq!(checkpoint_entries.len(), 1);
+
+        if let TranscriptEntry::Checkpoint { has_shell_exec, .. } = &checkpoint_entries[0] {
+            assert!(
+                has_shell_exec,
+                "checkpoint should flag shell_exec from earlier iteration"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_deduplicates_equivalent_paths() {
+        // Edit the same file via two different path representations
+        let repo = setup_git_repo();
+        let file_path = repo.path().join("test.txt");
+        std::fs::write(&file_path, "original content here").unwrap();
+
+        // Use relative path first, then ./relative path
+        let rel_path1 = "test.txt";
+        let rel_path2 = "./test.txt";
+
+        let mock = MockGrokApi::new(vec![
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![
+                    ToolCall {
+                        call_id: "call_1".into(),
+                        name: "file_edit".into(),
+                        arguments: format!(
+                            r#"{{"path": "{}", "old_string": "original", "new_string": "first"}}"#,
+                            rel_path1
+                        ),
+                    },
+                    ToolCall {
+                        call_id: "call_2".into(),
+                        name: "file_edit".into(),
+                        arguments: format!(
+                            r#"{{"path": "{}", "old_string": "first", "new_string": "second"}}"#,
+                            rel_path2
+                        ),
+                    },
+                ],
+                usage: None,
+            },
+            TurnResponse {
+                text: "Edited.".into(),
+                tool_calls: vec![],
+                usage: None,
+            },
+        ]);
+
+        let agent = Agent::new(&mock, repo.path());
+        let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "edit"})];
+
+        let result = agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+            .await
+            .unwrap();
+
+        let checkpoint_entries: Vec<_> = result.entries.iter()
+            .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
+            .collect();
+        assert_eq!(checkpoint_entries.len(), 1);
+
+        if let TranscriptEntry::Checkpoint { snapshots, .. } = &checkpoint_entries[0] {
+            assert_eq!(
+                snapshots.len(),
+                1,
+                "test.txt and ./test.txt should dedup to one snapshot"
+            );
+
+            // pre_hash should point to original content
+            let restored = checkpoint::git_cat_file_blob(&snapshots[0].pre_hash, repo.path()).unwrap();
+            assert_eq!(String::from_utf8(restored).unwrap(), "original content here");
         }
     }
 

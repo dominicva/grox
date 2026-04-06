@@ -217,6 +217,58 @@ pub fn resolve_checkpoint_path(path: &str, project_root: &Path) -> PathBuf {
     }
 }
 
+/// Validate and normalize a checkpoint path against the project root.
+///
+/// Unlike `util::validate_path`, this does NOT require the file or its parent
+/// directory to exist (since file_write creates missing parents). Instead it
+/// canonicalizes the project root and checks that the resolved path (with `..`
+/// and `.` components cleaned) stays inside it.
+///
+/// Returns the normalized absolute path on success, or None if the path
+/// escapes the project root.
+pub fn validate_checkpoint_path(abs_path: &Path, project_root: &Path) -> Option<PathBuf> {
+    // Canonicalize project root (must exist)
+    let canonical_root = project_root.canonicalize().ok()?;
+
+    // For the target path, we can't canonicalize (file may not exist).
+    // Instead, clean `.` and `..` components manually, then check containment.
+    // If any existing prefix of the path is a symlink that escapes, we catch
+    // it by canonicalizing whatever ancestor does exist.
+    let mut existing_prefix = abs_path.to_path_buf();
+    let mut suffix_parts: Vec<std::ffi::OsString> = Vec::new();
+
+    // Walk up until we find an ancestor that exists
+    while !existing_prefix.exists() {
+        if let Some(name) = existing_prefix.file_name() {
+            suffix_parts.push(name.to_os_string());
+        } else {
+            return None; // degenerate path
+        }
+        if !existing_prefix.pop() {
+            return None;
+        }
+    }
+
+    // Canonicalize the existing prefix (resolves symlinks)
+    let mut normalized = existing_prefix.canonicalize().ok()?;
+
+    // Re-append the non-existing parts
+    for part in suffix_parts.into_iter().rev() {
+        let part_str = part.to_string_lossy();
+        if part_str == ".." || part_str == "." {
+            return None; // suspicious — reject
+        }
+        normalized.push(part);
+    }
+
+    // Check containment
+    if normalized.starts_with(&canonical_root) {
+        Some(normalized)
+    } else {
+        None
+    }
+}
+
 /// Extract the file path from a tool's JSON arguments.
 ///
 /// Returns `None` if the arguments don't contain a "path" field.
@@ -505,6 +557,69 @@ mod tests {
         let root = Path::new("/project");
         let resolved = resolve_checkpoint_path("/other/file.txt", root);
         assert_eq!(resolved, PathBuf::from("/other/file.txt"));
+    }
+
+    // --- validate_checkpoint_path ---
+
+    #[test]
+    fn validate_checkpoint_path_existing_file() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        fs::write(&file, "content").unwrap();
+
+        let result = validate_checkpoint_path(&file, dir.path());
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn validate_checkpoint_path_new_file_in_existing_dir() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("new.txt");
+
+        let result = validate_checkpoint_path(&file, dir.path());
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn validate_checkpoint_path_new_file_in_new_dir() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("new_dir").join("nested").join("file.txt");
+
+        let result = validate_checkpoint_path(&file, dir.path());
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn validate_checkpoint_path_rejects_escape() {
+        let dir = tempdir().unwrap();
+        let outside = dir.path().join("..").join("escape.txt");
+
+        let result = validate_checkpoint_path(&outside, dir.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn validate_checkpoint_path_rejects_absolute_outside() {
+        let dir = tempdir().unwrap();
+        let outside = Path::new("/etc/passwd");
+
+        let result = validate_checkpoint_path(outside, dir.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn validate_checkpoint_path_normalizes_dot_components() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        fs::write(&file, "content").unwrap();
+
+        let with_dot = dir.path().join("./test.txt");
+        let result = validate_checkpoint_path(&with_dot, dir.path());
+        assert!(result.is_some());
+
+        // Should normalize to the same canonical path
+        let canonical = file.canonicalize().unwrap();
+        assert_eq!(result.unwrap(), canonical);
     }
 
     // --- FileSnapshot serialization ---
