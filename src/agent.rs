@@ -162,7 +162,10 @@ impl<'a> Agent<'a> {
                     }
                 };
 
-                // Snapshot file after modification (checkpoint)
+                // Snapshot file after modification (checkpoint).
+                // If the same file was already edited in this batch, update
+                // the existing snapshot's post_hash (keeping the original
+                // pre_hash so undo restores to the true start-of-turn state).
                 if let Some(pre) = pre_hash {
                     if let Some(path) = checkpoint::extract_tool_path(&tc.arguments) {
                         let abs_path =
@@ -170,11 +173,19 @@ impl<'a> Agent<'a> {
                         if let Ok(post) =
                             checkpoint::snapshot_post(&abs_path, &self.project_root)
                         {
-                            snapshots.push(FileSnapshot {
-                                path: abs_path.display().to_string(),
-                                pre_hash: pre,
-                                post_hash: post,
-                            });
+                            let path_str = abs_path.display().to_string();
+                            if let Some(existing) =
+                                snapshots.iter_mut().find(|s| s.path == path_str)
+                            {
+                                // Keep first pre_hash, update to latest post_hash
+                                existing.post_hash = post;
+                            } else {
+                                snapshots.push(FileSnapshot {
+                                    path: path_str,
+                                    pre_hash: pre,
+                                    post_hash: post,
+                                });
+                            }
                         }
                     }
                 }
@@ -886,6 +897,72 @@ mod tests {
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
         assert_eq!(checkpoint_entries.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_deduplicates_same_file_edits() {
+        let repo = setup_git_repo();
+        let file_path = repo.path().join("test.txt");
+        std::fs::write(&file_path, "original content").unwrap();
+
+        let mock = MockGrokApi::new(vec![
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![
+                    ToolCall {
+                        call_id: "call_1".into(),
+                        name: "file_edit".into(),
+                        arguments: format!(
+                            r#"{{"path": "{}", "old_string": "original", "new_string": "first edit"}}"#,
+                            file_path.display()
+                        ),
+                    },
+                    ToolCall {
+                        call_id: "call_2".into(),
+                        name: "file_edit".into(),
+                        arguments: format!(
+                            r#"{{"path": "{}", "old_string": "first edit", "new_string": "second edit"}}"#,
+                            file_path.display()
+                        ),
+                    },
+                ],
+                usage: None,
+            },
+            TurnResponse {
+                text: "Edited twice.".into(),
+                tool_calls: vec![],
+                usage: None,
+            },
+        ]);
+
+        let agent = Agent::new(&mock, repo.path());
+        let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "edit"})];
+
+        let result = agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+            .await
+            .unwrap();
+
+        let checkpoint_entries: Vec<_> = result.entries.iter()
+            .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
+            .collect();
+        assert_eq!(checkpoint_entries.len(), 1);
+
+        if let TranscriptEntry::Checkpoint { snapshots, .. } = &checkpoint_entries[0] {
+            // Should be ONE snapshot for the file, not two
+            assert_eq!(snapshots.len(), 1, "same file should be deduplicated");
+            // pre_hash should be from BEFORE the first edit (original content)
+            // post_hash should be from AFTER the second edit
+            assert_ne!(snapshots[0].pre_hash, snapshots[0].post_hash);
+
+            // Verify: restoring from pre_hash should give us "original content"
+            let restored = checkpoint::git_cat_file_blob(&snapshots[0].pre_hash, repo.path()).unwrap();
+            assert_eq!(String::from_utf8(restored).unwrap(), "original content");
+
+            // And the file currently has "second edit content"
+            let current = std::fs::read_to_string(&file_path).unwrap();
+            assert_eq!(current, "second edit content");
+        }
     }
 
     #[tokio::test]
