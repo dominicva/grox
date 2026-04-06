@@ -1207,6 +1207,91 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // chunked summarization
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn llm_compact_uses_chunked_when_old_entries_exceed_80_percent() {
+        use crate::api::TurnResponse;
+        use crate::api::mock::CapturingMockGrokApi;
+
+        // 80% of 131_072 = 104_857 tokens. We need old entries exceeding this.
+        // Each entry token_estimate = content.len() / 4
+        // So we need total content > 104_857 * 4 = 419_428 chars in old entries.
+        let big_content = "x".repeat(250_000);
+
+        let mock = CapturingMockGrokApi::new(vec![
+            // First pass: summarize older half
+            TurnResponse {
+                text: "First half summary.".into(),
+                tool_calls: vec![],
+                usage: Some(crate::api::Usage { input_tokens: 5000, output_tokens: 500 }),
+            },
+            // Second pass: combine with newer half
+            TurnResponse {
+                text: "Combined summary.".into(),
+                tool_calls: vec![],
+                usage: Some(crate::api::Usage { input_tokens: 3000, output_tokens: 400 }),
+            },
+        ]);
+
+        let mut entries = vec![
+            TranscriptEntry::user_message(&big_content),
+            TranscriptEntry::assistant_message(&big_content),
+        ];
+        // Add 5 more turns to push the big ones into old region
+        for i in 1..=5 {
+            entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
+        }
+
+        let result = llm_compact(&entries, "grok-3", &mock).await.unwrap();
+        assert!(result.compacted);
+
+        // Should have made 2 API calls (chunked)
+        let counts = mock.captured_input_counts.lock().unwrap();
+        assert_eq!(counts.len(), 2, "chunked summarization should make 2 API calls");
+
+        // Usage should be combined
+        let usage = result.llm_usage.unwrap();
+        assert_eq!(usage.input_tokens, 8000);
+        assert_eq!(usage.output_tokens, 900);
+
+        // Result should have the combined summary
+        if let TranscriptEntry::CompactionSummary { summary, .. } = &result.entries[0] {
+            assert_eq!(summary, "Combined summary.");
+        } else {
+            panic!("First entry should be CompactionSummary");
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_compact_uses_single_when_below_overflow() {
+        use crate::api::TurnResponse;
+        use crate::api::mock::CapturingMockGrokApi;
+
+        let mock = CapturingMockGrokApi::new(vec![
+            TurnResponse {
+                text: "Single pass summary.".into(),
+                tool_calls: vec![],
+                usage: Some(crate::api::Usage { input_tokens: 1000, output_tokens: 200 }),
+            },
+        ]);
+
+        // Small entries — well below 80% of context window
+        let mut entries: Vec<TranscriptEntry> = Vec::new();
+        for i in 0..8 {
+            entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
+        }
+
+        let result = llm_compact(&entries, "grok-3", &mock).await.unwrap();
+        assert!(result.compacted);
+
+        // Should have made only 1 API call (not chunked)
+        let counts = mock.captured_input_counts.lock().unwrap();
+        assert_eq!(counts.len(), 1, "should use single pass for small transcripts");
+    }
+
+    // -----------------------------------------------------------------------
     // format_entries_for_summarization
     // -----------------------------------------------------------------------
 
