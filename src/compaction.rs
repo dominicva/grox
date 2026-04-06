@@ -5,8 +5,43 @@ use crate::context_assembler::ContextAssembler;
 use crate::model_profile::ModelProfile;
 use crate::session::TranscriptEntry;
 
-/// Number of recent user turns to preserve verbatim during heuristic compaction.
+/// Number of recent user turns to preserve verbatim during compaction.
 const RECENT_TURNS: usize = 5;
+
+/// System prompt for LLM-based summarization.
+const SUMMARIZATION_PROMPT: &str = "\
+You are a conversation summarizer for a coding assistant session. \
+Produce a structured summary of the conversation using exactly these 9 sections. \
+Each section should be concise but capture all important details. \
+If a section has nothing relevant, write \"None.\" under it. \
+Do not add any sections beyond these 9.\n\
+\n\
+## Primary Request\n\
+What the user originally asked for and the main goal of the conversation.\n\
+\n\
+## Technical Concepts\n\
+Key technical concepts, patterns, or architectural decisions discussed.\n\
+\n\
+## Files & Code\n\
+Files that were read, written, or edited, with brief notes on what was done to each.\n\
+\n\
+## Errors & Fixes\n\
+Any errors encountered and how they were resolved.\n\
+\n\
+## Problem Solving\n\
+Key decision points, trade-offs considered, and reasoning applied.\n\
+\n\
+## User Messages\n\
+Important clarifications, preferences, or constraints the user communicated.\n\
+\n\
+## Pending Tasks\n\
+Work that was discussed but not yet completed.\n\
+\n\
+## Current Work\n\
+What was being worked on most recently.\n\
+\n\
+## Next Step\n\
+What should happen next based on the conversation state.";
 
 /// Result of running compaction (heuristic and/or LLM).
 pub struct CompactionResult {
@@ -242,6 +277,37 @@ fn make_placeholder(tool_name: &str, output: &str, arguments: &str) -> String {
             format!("[{tool_name}: {line_count} lines]")
         }
     }
+}
+
+/// Format transcript entries as human-readable text for LLM summarization.
+fn format_entries_for_summarization(entries: &[TranscriptEntry]) -> String {
+    let mut text = String::new();
+    for entry in entries {
+        match entry {
+            TranscriptEntry::UserMessage { content, .. } => {
+                text.push_str(&format!("User: {content}\n\n"));
+            }
+            TranscriptEntry::AssistantMessage { content, .. } => {
+                text.push_str(&format!("Assistant: {content}\n\n"));
+            }
+            TranscriptEntry::ToolCall { name, arguments, .. } => {
+                text.push_str(&format!("Tool call: {name}({arguments})\n\n"));
+            }
+            TranscriptEntry::ToolResult { name, output, .. } => {
+                let display = if output.len() > 500 {
+                    format!("{}... (truncated)", &output[..500])
+                } else {
+                    output.clone()
+                };
+                text.push_str(&format!("Tool result ({name}): {display}\n\n"));
+            }
+            TranscriptEntry::CompactionSummary { summary, .. } => {
+                text.push_str(&format!("Previous summary: {summary}\n\n"));
+            }
+            TranscriptEntry::SystemEvent { .. } => {}
+        }
+    }
+    text
 }
 
 /// Truncate shell output to first 3 + last 3 lines.
@@ -934,5 +1000,73 @@ mod tests {
 
         let result = maybe_compact(&entries, &assembler, "grok-3", Path::new("/project"));
         assert!(result.is_none(), "should return None when above threshold but nothing compactable");
+    }
+
+    // -----------------------------------------------------------------------
+    // format_entries_for_summarization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_entries_includes_all_message_types() {
+        let entries = vec![
+            TranscriptEntry::user_message("hello"),
+            TranscriptEntry::assistant_message("hi there"),
+            TranscriptEntry::tool_call("c1", "file_read", r#"{"path":"a.rs"}"#),
+            TranscriptEntry::tool_result("c1", "file_read", "fn main() {}"),
+            TranscriptEntry::compaction_summary("earlier context"),
+            TranscriptEntry::system_event("session started"),
+        ];
+
+        let text = format_entries_for_summarization(&entries);
+        assert!(text.contains("User: hello"));
+        assert!(text.contains("Assistant: hi there"));
+        assert!(text.contains("Tool call: file_read"));
+        assert!(text.contains("Tool result (file_read): fn main() {}"));
+        assert!(text.contains("Previous summary: earlier context"));
+        // SystemEvent should be skipped
+        assert!(!text.contains("session started"));
+    }
+
+    #[test]
+    fn format_entries_truncates_long_tool_output() {
+        let long_output = "x".repeat(1000);
+        let entries = vec![
+            TranscriptEntry::tool_result("c1", "file_read", &long_output),
+        ];
+
+        let text = format_entries_for_summarization(&entries);
+        assert!(text.contains("(truncated)"));
+        assert!(text.len() < long_output.len() + 100);
+    }
+
+    #[test]
+    fn format_entries_empty_transcript() {
+        let text = format_entries_for_summarization(&[]);
+        assert!(text.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // SUMMARIZATION_PROMPT sanity
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn summarization_prompt_has_all_9_sections() {
+        let sections = [
+            "## Primary Request",
+            "## Technical Concepts",
+            "## Files & Code",
+            "## Errors & Fixes",
+            "## Problem Solving",
+            "## User Messages",
+            "## Pending Tasks",
+            "## Current Work",
+            "## Next Step",
+        ];
+        for section in &sections {
+            assert!(
+                SUMMARIZATION_PROMPT.contains(section),
+                "missing section: {section}"
+            );
+        }
     }
 }
