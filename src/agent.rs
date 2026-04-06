@@ -170,7 +170,7 @@ pub struct AgentResult {
 mod tests {
     use super::*;
     use crate::api::TurnResponse;
-    use crate::api::mock::MockGrokApi;
+    use crate::api::mock::{CapturingMockGrokApi, MockGrokApi};
     use crate::tools::ToolCall;
 
     fn noop_token(_: String) {}
@@ -602,5 +602,69 @@ mod tests {
             .unwrap();
 
         assert_eq!(refresh_count, 0, "should not refresh when tool was denied");
+    }
+
+    // --- History accumulation verification ---
+
+    #[tokio::test]
+    async fn full_history_sent_across_inner_iterations() {
+        // Verifies that the agent sends growing message arrays on each inner
+        // iteration, proving local history accumulation works end-to-end.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut &tmp, b"content").unwrap();
+        let path = tmp.path().to_str().unwrap();
+
+        let mock = CapturingMockGrokApi::new(vec![
+            // Iteration 1: model requests a file_read
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_1".into(),
+                    name: "file_read".into(),
+                    arguments: format!(r#"{{"path": "{}"}}"#, path),
+                }],
+                usage: None,
+            },
+            // Iteration 2: model requests another file_read
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_2".into(),
+                    name: "file_read".into(),
+                    arguments: format!(r#"{{"path": "{}"}}"#, path),
+                }],
+                usage: None,
+            },
+            // Iteration 3: model responds with text (no more tools)
+            TurnResponse {
+                text: "All done.".into(),
+                tool_calls: vec![],
+                usage: None,
+            },
+        ]);
+
+        let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
+        // Initial input: system prompt + user message = 2 messages
+        let input = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "user", "content": "read twice"}),
+        ];
+
+        let result = agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+            .await
+            .unwrap();
+
+        assert_eq!(result.text, "All done.");
+
+        let counts = mock.captured_input_counts.lock().unwrap();
+        assert_eq!(counts.len(), 3, "should have made 3 API calls");
+
+        // Call 1: system + user = 2
+        assert_eq!(counts[0], 2);
+        // Call 2: system + user + tool_call_1 + tool_result_1 = 4
+        assert_eq!(counts[1], 4);
+        // Call 3: system + user + tool_call_1 + tool_result_1 + tool_call_2 + tool_result_2 = 6
+        assert_eq!(counts[2], 6);
     }
 }

@@ -265,4 +265,42 @@ pub mod mock {
             Ok(response)
         }
     }
+
+    /// A mock that captures the input message counts from each send_turn call.
+    /// Used to verify that the agent accumulates full history across iterations.
+    pub struct CapturingMockGrokApi {
+        responses: std::sync::Mutex<Vec<TurnResponse>>,
+        /// Number of input messages received on each call.
+        pub captured_input_counts: std::sync::Mutex<Vec<usize>>,
+    }
+
+    impl CapturingMockGrokApi {
+        pub fn new(responses: Vec<TurnResponse>) -> Self {
+            Self {
+                responses: std::sync::Mutex::new(responses),
+                captured_input_counts: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl GrokApi for CapturingMockGrokApi {
+        async fn send_turn(
+            &self,
+            input: Vec<Value>,
+            _tools: &[Value],
+            on_token: &mut (dyn FnMut(String) + Send),
+        ) -> Result<TurnResponse> {
+            self.captured_input_counts.lock().unwrap().push(input.len());
+            let mut responses = self.responses.lock().unwrap();
+            if responses.is_empty() {
+                bail!("CapturingMockGrokApi: no more scripted responses");
+            }
+            let response = responses.remove(0);
+            if !response.text.is_empty() {
+                on_token(response.text.clone());
+            }
+            Ok(response)
+        }
+    }
 }
