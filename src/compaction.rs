@@ -327,15 +327,18 @@ async fn chunked_summarize(
 ///
 /// Used by chunked summarization to split at a turn boundary rather than
 /// at an arbitrary entry index, preventing orphaned ToolCall/ToolResult pairs.
-/// Falls back to raw midpoint if no UserMessage is found.
+/// Falls back to raw midpoint if no valid UserMessage boundary exists
+/// (no UserMessages, or the only candidate is index 0 which would produce
+/// an empty first half).
 fn find_turn_boundary_near_midpoint(entries: &[TranscriptEntry]) -> usize {
     let midpoint = entries.len() / 2;
 
-    // Collect indices of all UserMessage entries
+    // Collect indices of UserMessage entries, excluding index 0
+    // (splitting at 0 produces an empty first half which defeats chunking)
     let user_indices: Vec<usize> = entries
         .iter()
         .enumerate()
-        .filter(|(_, e)| matches!(e, TranscriptEntry::UserMessage { .. }))
+        .filter(|(i, e)| *i > 0 && matches!(e, TranscriptEntry::UserMessage { .. }))
         .map(|(i, _)| i)
         .collect();
 
@@ -1454,6 +1457,22 @@ mod tests {
                 assert!(results.contains(call_id), "orphaned ToolCall {call_id}");
             }
         }
+    }
+
+    #[test]
+    fn turn_boundary_single_turn_falls_back_to_midpoint() {
+        // One big turn: User + ToolCall + ToolResult + Assistant = 4 entries
+        let entries = vec![
+            TranscriptEntry::user_message("big question"),
+            TranscriptEntry::tool_call("c0", "file_read", r#"{"path":"a.rs"}"#),
+            TranscriptEntry::tool_result("c0", "file_read", "content"),
+            TranscriptEntry::assistant_message("answer"),
+        ];
+
+        let split = find_turn_boundary_near_midpoint(&entries);
+        // Only UserMessage is at index 0 which is excluded — falls back to midpoint (2)
+        assert_eq!(split, 2, "single turn should fall back to raw midpoint");
+        assert!(split > 0, "should not produce empty first half");
     }
 
     #[test]
