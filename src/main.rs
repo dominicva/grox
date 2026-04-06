@@ -276,6 +276,26 @@ async fn main() -> Result<()> {
                 &mut |name: &str, args: &str| -> bool {
                     session_perms.authorize(name, args)
                 },
+                &mut || {
+                    // Refresh repo context after mutating tools
+                    let fresh_ctx = repo_context::RepoContext::gather(&project_root);
+                    let fresh_ctx_text = if fresh_ctx.text.is_empty() {
+                        None
+                    } else {
+                        Some(fresh_ctx.text.as_str())
+                    };
+                    let fresh_system_content = prompt::build_system_prompt(
+                        &project_root,
+                        fresh_ctx_text,
+                        grox_md.as_deref(),
+                    );
+                    let fresh_prompt = json!({
+                        "role": "system",
+                        "content": fresh_system_content
+                    });
+                    assembler.set_system_prompt(fresh_prompt.clone());
+                    fresh_prompt
+                },
             )
             .await
         {
@@ -289,36 +309,10 @@ async fn main() -> Result<()> {
                 println!();
 
                 // Persist transcript entries and update history
-                let mut had_mutating_tool = false;
                 for entry in &result.entries {
                     transcript.append(entry)?;
-                    // Check if any tool call was mutating (file_write, file_edit, shell_exec)
-                    if let TranscriptEntry::ToolCall { name, .. } = entry
-                        && (name == "file_write" || name == "file_edit" || name == "shell_exec")
-                    {
-                        had_mutating_tool = true;
-                    }
                 }
                 history.extend(result.entries);
-
-                // Refresh repo context after mutating tools
-                if had_mutating_tool {
-                    let fresh_ctx = repo_context::RepoContext::gather(&project_root);
-                    let fresh_ctx_text = if fresh_ctx.text.is_empty() {
-                        None
-                    } else {
-                        Some(fresh_ctx.text.as_str())
-                    };
-                    let fresh_system_content = prompt::build_system_prompt(
-                        &project_root,
-                        fresh_ctx_text,
-                        grox_md.as_deref(),
-                    );
-                    assembler.set_system_prompt(json!({
-                        "role": "system",
-                        "content": fresh_system_content
-                    }));
-                }
 
                 // Update session metadata
                 if let Some(usage) = &result.usage {

@@ -9,6 +9,10 @@ use crate::tools::Tool;
 
 const MAX_TURNS: usize = 25;
 
+/// Tools that mutate the filesystem or environment.
+/// After these execute, repo context should be refreshed.
+const MUTATING_TOOLS: &[&str] = &["file_write", "file_edit", "shell_exec"];
+
 pub struct Agent<'a> {
     api: &'a dyn GrokApi,
     tool_defs: Vec<Value>,
@@ -34,6 +38,9 @@ impl<'a> Agent<'a> {
     ///
     /// `on_authorize` is called before executing each tool. It receives the tool name
     /// and arguments, and returns true if the tool should be executed.
+    ///
+    /// `on_context_refresh` is called after mutating tools execute. It should return
+    /// a fresh system prompt (with updated repo context) to replace the existing one.
     pub async fn run(
         &self,
         input: Vec<Value>,
@@ -41,10 +48,12 @@ impl<'a> Agent<'a> {
         on_tool_call: &mut (dyn FnMut(&str, &str) + Send),
         on_tool_result: &mut (dyn FnMut(&str, &str) + Send),
         on_authorize: &mut (dyn FnMut(&str, &str) -> bool + Send),
+        on_context_refresh: &mut (dyn FnMut() -> Value + Send),
     ) -> Result<AgentResult> {
         let mut messages = input;
         let mut entries: Vec<TranscriptEntry> = Vec::new();
         let mut final_text = String::new();
+        let mut cumulative_usage: Option<crate::api::Usage> = None;
 
         for _turn in 0..MAX_TURNS {
             let response = self
@@ -56,6 +65,17 @@ impl<'a> Agent<'a> {
                 )
                 .await?;
 
+            // Accumulate usage across all inner iterations
+            if let Some(u) = &response.usage {
+                cumulative_usage = Some(match cumulative_usage {
+                    Some(prev) => crate::api::Usage {
+                        input_tokens: prev.input_tokens + u.input_tokens,
+                        output_tokens: prev.output_tokens + u.output_tokens,
+                    },
+                    None => u.clone(),
+                });
+            }
+
             final_text = response.text.clone();
 
             if response.tool_calls.is_empty() {
@@ -65,7 +85,7 @@ impl<'a> Agent<'a> {
                 }
                 return Ok(AgentResult {
                     text: final_text,
-                    usage: response.usage,
+                    usage: cumulative_usage,
                     entries,
                 });
             }
@@ -78,6 +98,8 @@ impl<'a> Agent<'a> {
             }
 
             // Execute tool calls and accumulate into messages
+            let mut had_mutation = false;
+
             for tc in &response.tool_calls {
                 on_tool_call(&tc.name, &tc.arguments);
 
@@ -92,9 +114,13 @@ impl<'a> Agent<'a> {
                 entries.push(tc_entry);
 
                 // Check permission before executing
-                let output = if !on_authorize(&tc.name, &tc.arguments) {
+                let authorized = on_authorize(&tc.name, &tc.arguments);
+                let output = if !authorized {
                     "Permission denied by user".to_string()
                 } else {
+                    if MUTATING_TOOLS.contains(&tc.name.as_str()) {
+                        had_mutation = true;
+                    }
                     match Tool::from_name(&tc.name) {
                         Some(tool) => match tool.execute(&tc.arguments, &self.project_root).await {
                             Ok(result) => result,
@@ -115,12 +141,18 @@ impl<'a> Agent<'a> {
                 }));
                 entries.push(tr_entry);
             }
+
+            // Refresh system prompt after mutating tools so the next iteration
+            // sees up-to-date repo context (git status, directory tree, etc.)
+            if had_mutation {
+                messages[0] = on_context_refresh();
+            }
         }
 
         // Hit max turns
         Ok(AgentResult {
             text: final_text,
-            usage: None,
+            usage: cumulative_usage,
             entries,
         })
     }
@@ -145,6 +177,7 @@ mod tests {
     fn noop_tool_call(_: &str, _: &str) {}
     fn noop_tool_result(_: &str, _: &str) {}
     fn allow_all(_: &str, _: &str) -> bool { true }
+    fn no_refresh() -> Value { json!({"role": "system", "content": "test"}) }
 
     #[tokio::test]
     async fn single_tool_call_round_trip() {
@@ -173,7 +206,7 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "read the file"})];
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all)
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
             .await
             .unwrap();
 
@@ -203,7 +236,7 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "read /nonexistent/file.rs"})];
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all)
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
             .await
             .unwrap();
 
@@ -222,7 +255,7 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "hello"})];
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all)
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
             .await
             .unwrap();
 
@@ -248,7 +281,7 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "loop forever"})];
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all)
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
             .await
             .unwrap();
 
@@ -278,7 +311,7 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "use a fake tool"})];
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all)
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
             .await
             .unwrap();
 
@@ -310,14 +343,14 @@ mod tests {
         let mut deny_all = |_: &str, _: &str| -> bool { false };
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut deny_all)
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut deny_all, &mut no_refresh)
             .await
             .unwrap();
 
         assert_eq!(result.text, "Write was denied.");
     }
 
-    // --- New tests for local history accumulation ---
+    // --- Transcript entry tests ---
 
     #[tokio::test]
     async fn returns_transcript_entries_for_simple_response() {
@@ -331,7 +364,7 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "hi"})];
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all)
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
             .await
             .unwrap();
 
@@ -359,19 +392,19 @@ mod tests {
                     arguments: format!(r#"{{"path": "{}"}}"#, path),
                 }],
                 usage: None,
-                },
+            },
             TurnResponse {
                 text: "The file says test content.".into(),
                 tool_calls: vec![],
                 usage: None,
-                },
+            },
         ]);
 
         let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
         let input = vec![json!({"role": "user", "content": "read it"})];
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all)
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
             .await
             .unwrap();
 
@@ -394,10 +427,180 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "hi"})];
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all)
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
             .await
             .unwrap();
 
         assert!(result.entries.is_empty());
+    }
+
+    // --- Usage accumulation tests ---
+
+    #[tokio::test]
+    async fn usage_accumulated_across_inner_iterations() {
+        let mock = MockGrokApi::new(vec![
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_1".into(),
+                    name: "file_read".into(),
+                    arguments: r#"{"path": "/dev/null"}"#.into(),
+                }],
+                usage: Some(crate::api::Usage { input_tokens: 100, output_tokens: 50 }),
+            },
+            TurnResponse {
+                text: "Done.".into(),
+                tool_calls: vec![],
+                usage: Some(crate::api::Usage { input_tokens: 200, output_tokens: 75 }),
+            },
+        ]);
+
+        let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
+        let input = vec![json!({"role": "user", "content": "read"})];
+
+        let result = agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+            .await
+            .unwrap();
+
+        let usage = result.usage.unwrap();
+        assert_eq!(usage.input_tokens, 300);  // 100 + 200
+        assert_eq!(usage.output_tokens, 125); // 50 + 75
+    }
+
+    // --- Context refresh tests ---
+
+    #[tokio::test]
+    async fn context_refresh_called_after_mutating_tool() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_path = tmp.path().join("test.txt");
+
+        let mock = MockGrokApi::new(vec![
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_1".into(),
+                    name: "file_write".into(),
+                    arguments: format!(r#"{{"path": "{}", "content": "hello"}}"#, file_path.display()),
+                }],
+                usage: None,
+            },
+            TurnResponse {
+                text: "Written.".into(),
+                tool_calls: vec![],
+                usage: None,
+            },
+        ]);
+
+        let agent = Agent::new(&mock, tmp.path());
+        let input = vec![json!({"role": "system", "content": "old"}), json!({"role": "user", "content": "write"})];
+
+        let mut refresh_count = 0;
+        let result = agent
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut || {
+                    refresh_count += 1;
+                    json!({"role": "system", "content": "refreshed"})
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(refresh_count, 1);
+        assert_eq!(result.text, "Written.");
+    }
+
+    #[tokio::test]
+    async fn context_refresh_not_called_for_read_only_tools() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut &tmp, b"data").unwrap();
+        let path = tmp.path().to_str().unwrap();
+
+        let mock = MockGrokApi::new(vec![
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_1".into(),
+                    name: "file_read".into(),
+                    arguments: format!(r#"{{"path": "{}"}}"#, path),
+                }],
+                usage: None,
+            },
+            TurnResponse {
+                text: "Read it.".into(),
+                tool_calls: vec![],
+                usage: None,
+            },
+        ]);
+
+        let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
+        let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "read"})];
+
+        let mut refresh_count = 0;
+        let result = agent
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut || {
+                    refresh_count += 1;
+                    json!({"role": "system", "content": "refreshed"})
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(refresh_count, 0);
+        assert_eq!(result.text, "Read it.");
+    }
+
+    #[tokio::test]
+    async fn context_refresh_not_called_when_permission_denied() {
+        let mock = MockGrokApi::new(vec![
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_1".into(),
+                    name: "file_write".into(),
+                    arguments: r#"{"path": "/tmp/x.txt", "content": "y"}"#.into(),
+                }],
+                usage: None,
+            },
+            TurnResponse {
+                text: "Denied.".into(),
+                tool_calls: vec![],
+                usage: None,
+            },
+        ]);
+
+        let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
+        let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "write"})];
+
+        let mut deny_all = |_: &str, _: &str| -> bool { false };
+        let mut refresh_count = 0;
+
+        agent
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut deny_all,
+                &mut || {
+                    refresh_count += 1;
+                    json!({"role": "system", "content": "refreshed"})
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(refresh_count, 0, "should not refresh when tool was denied");
     }
 }
