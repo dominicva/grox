@@ -241,6 +241,12 @@ async fn main() -> Result<()> {
                     let profile = model_profile::ModelProfile::for_model(client.model());
                     profile.estimate_cost(u.input_tokens, u.output_tokens)
                 });
+                // Add LLM compaction usage to cumulative session totals
+                if let Some(u) = &result.llm_usage {
+                    session_meta.cumulative_input_tokens += u.input_tokens;
+                    session_meta.cumulative_output_tokens += u.output_tokens;
+                    let _ = session_meta.save(&sessions_dir);
+                }
                 history = result.entries;
                 transcript.atomic_rewrite(&history)?;
                 let mut msg = format!(
@@ -273,6 +279,12 @@ async fn main() -> Result<()> {
                 let profile = model_profile::ModelProfile::for_model(client.model());
                 profile.estimate_cost(u.input_tokens, u.output_tokens)
             });
+            // Add LLM compaction usage to cumulative session totals
+            if let Some(u) = &result.llm_usage {
+                session_meta.cumulative_input_tokens += u.input_tokens;
+                session_meta.cumulative_output_tokens += u.output_tokens;
+                let _ = session_meta.save(&sessions_dir);
+            }
             history = result.entries;
             transcript.atomic_rewrite(&history)?;
             let mut msg = format!(
