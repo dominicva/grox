@@ -454,6 +454,14 @@ async fn main() -> Result<()> {
                     assembler.set_system_prompt(fresh_prompt.clone());
                     fresh_prompt
                 },
+                &mut |entry: &session::TranscriptEntry| -> anyhow::Result<()> {
+                    // Persist each entry to disk before adding to in-memory history.
+                    // If disk write fails, return the error so the agent halts —
+                    // continuing would risk file edits with no durable checkpoint.
+                    transcript.append(entry)?;
+                    history.push(entry.clone());
+                    Ok(())
+                },
             )
             .await
         {
@@ -465,12 +473,6 @@ async fn main() -> Result<()> {
                     );
                 }
                 println!();
-
-                // Persist transcript entries and update history
-                for entry in &result.entries {
-                    transcript.append(entry)?;
-                }
-                history.extend(result.entries);
 
                 // Update session metadata
                 if let Some(usage) = &result.usage {

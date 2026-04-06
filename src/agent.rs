@@ -57,14 +57,13 @@ impl<'a> Agent<'a> {
         on_tool_result: &mut (dyn FnMut(&str, &str) + Send),
         on_authorize: &mut (dyn FnMut(&str, &str) -> bool + Send),
         on_context_refresh: &mut (dyn FnMut() -> Value + Send),
+        on_entry: &mut (dyn FnMut(&TranscriptEntry) -> Result<()> + Send),
     ) -> Result<AgentResult> {
         let mut messages = input;
-        let mut entries: Vec<TranscriptEntry> = Vec::new();
         let mut final_text = String::new();
         let mut cumulative_usage: Option<crate::api::Usage> = None;
         // Track shell_exec at the user-turn level (across all inner iterations)
-        // so checkpoints always carry the warning regardless of which iteration
-        // the shell_exec happened in.
+        // so checkpoints carry the warning if shell_exec preceded them.
         let mut turn_had_shell_exec = false;
 
         for _turn in 0..MAX_TURNS {
@@ -93,18 +92,12 @@ impl<'a> Agent<'a> {
             if response.tool_calls.is_empty() {
                 // Final assistant message
                 if !final_text.is_empty() {
-                    entries.push(TranscriptEntry::assistant_message(&final_text));
-                }
-                // Ensure all checkpoints in this turn carry the final
-                // shell_exec flag (shell_exec may have happened in an earlier
-                // iteration before or after checkpoint-producing iterations).
-                if turn_had_shell_exec {
-                    patch_checkpoint_shell_flag(&mut entries);
+                    let entry = TranscriptEntry::assistant_message(&final_text);
+                    on_entry(&entry)?;
                 }
                 return Ok(AgentResult {
                     text: final_text,
                     usage: cumulative_usage,
-                    entries,
                 });
             }
 
@@ -112,12 +105,11 @@ impl<'a> Agent<'a> {
             if !response.text.is_empty() {
                 let entry = TranscriptEntry::assistant_message(&response.text);
                 messages.push(json!({"role": "assistant", "content": response.text}));
-                entries.push(entry);
+                on_entry(&entry)?;
             }
 
             // Execute tool calls and accumulate into messages
             let mut had_mutation = false;
-            let mut snapshots: Vec<FileSnapshot> = Vec::new();
 
             for tc in &response.tool_calls {
                 on_tool_call(&tc.name, &tc.arguments);
@@ -130,7 +122,7 @@ impl<'a> Agent<'a> {
                     "arguments": tc.arguments,
                     "call_id": tc.call_id,
                 }));
-                entries.push(tc_entry);
+                on_entry(&tc_entry)?;
 
                 // Check permission before executing
                 let authorized = on_authorize(&tc.name, &tc.arguments);
@@ -176,28 +168,26 @@ impl<'a> Agent<'a> {
                     }
                 };
 
-                // Snapshot file after modification (checkpoint).
-                // Uses the canonical path from pre-snapshot for consistent dedup.
-                // If the same file was already edited in this batch, update
-                // the existing snapshot's post_hash (keeping the original
-                // pre_hash so undo restores to the true start-of-turn state).
+                // Persist checkpoint IMMEDIATELY after post-snapshot, BEFORE
+                // the tool result. This closes the gap where a file is already
+                // changed on disk but no durable checkpoint exists yet.
+                // Each file-modifying tool gets its own checkpoint entry.
+                // Rewind processes all checkpoints in reverse order, so
+                // multiple edits to the same file are handled correctly
+                // without explicit dedup.
                 if let Some((canonical, pre)) = pre_snapshot {
                     if let Ok(post) =
                         checkpoint::snapshot_post(&canonical, &self.project_root)
                     {
-                        let path_str = canonical.display().to_string();
-                        if let Some(existing) =
-                            snapshots.iter_mut().find(|s| s.path == path_str)
-                        {
-                            // Keep first pre_hash, update to latest post_hash
-                            existing.post_hash = post;
-                        } else {
-                            snapshots.push(FileSnapshot {
-                                path: path_str,
+                        let cp = TranscriptEntry::checkpoint(
+                            vec![FileSnapshot {
+                                path: canonical.display().to_string(),
                                 pre_hash: pre,
                                 post_hash: post,
-                            });
-                        }
+                            }],
+                            turn_had_shell_exec,
+                        );
+                        on_entry(&cp)?;
                     }
                 }
 
@@ -210,14 +200,7 @@ impl<'a> Agent<'a> {
                     "call_id": tc.call_id,
                     "output": output,
                 }));
-                entries.push(tr_entry);
-            }
-
-            // Record checkpoint if any files were modified.
-            // had_shell_exec is tracked at the turn level (across all iterations)
-            // so the warning covers shell_exec in any iteration, not just this one.
-            if !snapshots.is_empty() {
-                entries.push(TranscriptEntry::checkpoint(snapshots, turn_had_shell_exec));
+                on_entry(&tr_entry)?;
             }
 
             // Refresh system prompt after mutating tools so the next iteration
@@ -228,25 +211,10 @@ impl<'a> Agent<'a> {
         }
 
         // Hit max turns
-        if turn_had_shell_exec {
-            patch_checkpoint_shell_flag(&mut entries);
-        }
         Ok(AgentResult {
             text: final_text,
             usage: cumulative_usage,
-            entries,
         })
-    }
-}
-
-/// Retroactively set `has_shell_exec = true` on all Checkpoint entries.
-/// Called at the end of a user turn when shell_exec happened in any iteration,
-/// since checkpoints emitted in earlier iterations wouldn't have seen it yet.
-fn patch_checkpoint_shell_flag(entries: &mut [TranscriptEntry]) {
-    for entry in entries.iter_mut() {
-        if let TranscriptEntry::Checkpoint { has_shell_exec, .. } = entry {
-            *has_shell_exec = true;
-        }
     }
 }
 
@@ -254,8 +222,6 @@ fn patch_checkpoint_shell_flag(entries: &mut [TranscriptEntry]) {
 pub struct AgentResult {
     pub text: String,
     pub usage: Option<crate::api::Usage>,
-    /// Transcript entries generated during this turn, for persistence.
-    pub entries: Vec<TranscriptEntry>,
 }
 
 #[cfg(test)]
@@ -270,6 +236,21 @@ mod tests {
     fn noop_tool_result(_: &str, _: &str) {}
     fn allow_all(_: &str, _: &str) -> bool { true }
     fn no_refresh() -> Value { json!({"role": "system", "content": "test"}) }
+    fn noop_entry(_: &TranscriptEntry) -> Result<()> { Ok(()) }
+
+    /// Collect entries emitted via on_entry callback.
+    fn collecting_entries() -> (
+        impl FnMut(&TranscriptEntry) -> Result<()> + Send,
+        std::sync::Arc<std::sync::Mutex<Vec<TranscriptEntry>>>,
+    ) {
+        let entries = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let entries_clone = entries.clone();
+        let callback = move |entry: &TranscriptEntry| -> Result<()> {
+            entries_clone.lock().unwrap().push(entry.clone());
+            Ok(())
+        };
+        (callback, entries)
+    }
 
     #[tokio::test]
     async fn single_tool_call_round_trip() {
@@ -298,7 +279,7 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "read the file"})];
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut noop_entry)
             .await
             .unwrap();
 
@@ -328,7 +309,7 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "read /nonexistent/file.rs"})];
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut noop_entry)
             .await
             .unwrap();
 
@@ -347,7 +328,7 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "hello"})];
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut noop_entry)
             .await
             .unwrap();
 
@@ -373,7 +354,7 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "loop forever"})];
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut noop_entry)
             .await
             .unwrap();
 
@@ -403,7 +384,7 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "use a fake tool"})];
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut noop_entry)
             .await
             .unwrap();
 
@@ -435,7 +416,7 @@ mod tests {
         let mut deny_all = |_: &str, _: &str| -> bool { false };
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut deny_all, &mut no_refresh)
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut deny_all, &mut no_refresh, &mut noop_entry)
             .await
             .unwrap();
 
@@ -454,14 +435,17 @@ mod tests {
 
         let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
         let input = vec![json!({"role": "user", "content": "hi"})];
+        let (mut on_entry, collected) = collecting_entries();
 
-        let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+        agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
             .await
             .unwrap();
+        drop(on_entry);
 
-        assert_eq!(result.entries.len(), 1);
-        match &result.entries[0] {
+        let entries = collected.lock().unwrap();
+        assert_eq!(entries.len(), 1);
+        match &entries[0] {
             TranscriptEntry::AssistantMessage { content, .. } => {
                 assert_eq!(content, "Hello!");
             }
@@ -494,17 +478,20 @@ mod tests {
 
         let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
         let input = vec![json!({"role": "user", "content": "read it"})];
+        let (mut on_entry, collected) = collecting_entries();
 
-        let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+        agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
             .await
             .unwrap();
+        drop(on_entry);
 
         // Should have: ToolCall, ToolResult, AssistantMessage
-        assert_eq!(result.entries.len(), 3);
-        assert!(matches!(&result.entries[0], TranscriptEntry::ToolCall { name, .. } if name == "file_read"));
-        assert!(matches!(&result.entries[1], TranscriptEntry::ToolResult { call_id, .. } if call_id == "call_1"));
-        assert!(matches!(&result.entries[2], TranscriptEntry::AssistantMessage { content, .. } if content == "The file says test content."));
+        let entries = collected.lock().unwrap();
+        assert_eq!(entries.len(), 3);
+        assert!(matches!(&entries[0], TranscriptEntry::ToolCall { name, .. } if name == "file_read"));
+        assert!(matches!(&entries[1], TranscriptEntry::ToolResult { call_id, .. } if call_id == "call_1"));
+        assert!(matches!(&entries[2], TranscriptEntry::AssistantMessage { content, .. } if content == "The file says test content."));
     }
 
     #[tokio::test]
@@ -517,13 +504,15 @@ mod tests {
 
         let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
         let input = vec![json!({"role": "user", "content": "hi"})];
+        let (mut on_entry, collected) = collecting_entries();
 
-        let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+        agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
             .await
             .unwrap();
+        drop(on_entry);
 
-        assert!(result.entries.is_empty());
+        assert!(collected.lock().unwrap().is_empty());
     }
 
     // --- Usage accumulation tests ---
@@ -551,7 +540,7 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "read"})];
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut noop_entry)
             .await
             .unwrap();
 
@@ -599,6 +588,7 @@ mod tests {
                     refresh_count += 1;
                     json!({"role": "system", "content": "refreshed"})
                 },
+                &mut noop_entry,
             )
             .await
             .unwrap();
@@ -645,6 +635,7 @@ mod tests {
                     refresh_count += 1;
                     json!({"role": "system", "content": "refreshed"})
                 },
+                &mut noop_entry,
             )
             .await
             .unwrap();
@@ -689,6 +680,7 @@ mod tests {
                     refresh_count += 1;
                     json!({"role": "system", "content": "refreshed"})
                 },
+                &mut noop_entry,
             )
             .await
             .unwrap();
@@ -742,14 +734,17 @@ mod tests {
 
         let agent = Agent::new(&mock, repo.path());
         let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "write"})];
+        let (mut on_entry, collected) = collecting_entries();
 
-        let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+        agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
             .await
             .unwrap();
+        drop(on_entry);
 
         // Should have: ToolCall, ToolResult, Checkpoint, AssistantMessage
-        let checkpoint_entries: Vec<_> = result.entries.iter()
+        let entries = collected.lock().unwrap();
+        let checkpoint_entries: Vec<_> = entries.iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
         assert_eq!(checkpoint_entries.len(), 1);
@@ -792,13 +787,16 @@ mod tests {
 
         let agent = Agent::new(&mock, repo.path());
         let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "edit"})];
+        let (mut on_entry, collected) = collecting_entries();
 
-        let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+        agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
             .await
             .unwrap();
+        drop(on_entry);
 
-        let checkpoint_entries: Vec<_> = result.entries.iter()
+        let entries = collected.lock().unwrap();
+        let checkpoint_entries: Vec<_> = entries.iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
         assert_eq!(checkpoint_entries.len(), 1);
@@ -837,13 +835,16 @@ mod tests {
 
         let agent = Agent::new(&mock, repo.path());
         let input = vec![json!({"role": "user", "content": "read"})];
+        let (mut on_entry, collected) = collecting_entries();
 
-        let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+        agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
             .await
             .unwrap();
+        drop(on_entry);
 
-        let checkpoint_entries: Vec<_> = result.entries.iter()
+        let entries = collected.lock().unwrap();
+        let checkpoint_entries: Vec<_> = entries.iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
         assert_eq!(checkpoint_entries.len(), 0);
@@ -874,13 +875,16 @@ mod tests {
         let agent = Agent::new(&mock, repo.path());
         let input = vec![json!({"role": "user", "content": "write"})];
         let mut deny_all = |_: &str, _: &str| -> bool { false };
+        let (mut on_entry, collected) = collecting_entries();
 
-        let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut deny_all, &mut no_refresh)
+        agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut deny_all, &mut no_refresh, &mut on_entry)
             .await
             .unwrap();
+        drop(on_entry);
 
-        let checkpoint_entries: Vec<_> = result.entries.iter()
+        let entries = collected.lock().unwrap();
+        let checkpoint_entries: Vec<_> = entries.iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
         assert_eq!(checkpoint_entries.len(), 0);
@@ -913,14 +917,17 @@ mod tests {
 
         let agent = Agent::new(&mock, repo.path());
         let input = vec![json!({"role": "user", "content": "write outside"})];
+        let (mut on_entry, collected) = collecting_entries();
 
-        let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+        agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
             .await
             .unwrap();
+        drop(on_entry);
 
         // Should have no checkpoint — path is outside project root
-        let checkpoint_entries: Vec<_> = result.entries.iter()
+        let entries = collected.lock().unwrap();
+        let checkpoint_entries: Vec<_> = entries.iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
         assert_eq!(checkpoint_entries.len(), 0);
@@ -964,36 +971,48 @@ mod tests {
 
         let agent = Agent::new(&mock, repo.path());
         let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "edit"})];
+        let (mut on_entry, collected) = collecting_entries();
 
-        let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+        agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
             .await
             .unwrap();
+        drop(on_entry);
 
-        let checkpoint_entries: Vec<_> = result.entries.iter()
+        let entries = collected.lock().unwrap();
+        let checkpoint_entries: Vec<_> = entries.iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
-        assert_eq!(checkpoint_entries.len(), 1);
+        // Each file-modifying tool gets its own checkpoint (persisted immediately
+        // after the file change for durability). No batched dedup needed — rewind
+        // processes checkpoints in reverse order.
+        assert_eq!(checkpoint_entries.len(), 2);
 
+        // First checkpoint: original → first edit
         if let TranscriptEntry::Checkpoint { snapshots, .. } = &checkpoint_entries[0] {
-            // Should be ONE snapshot for the file, not two
-            assert_eq!(snapshots.len(), 1, "same file should be deduplicated");
-            // pre_hash should be from BEFORE the first edit (original content)
-            // post_hash should be from AFTER the second edit
-            assert_ne!(snapshots[0].pre_hash, snapshots[0].post_hash);
-
-            // Verify: restoring from pre_hash should give us "original content"
+            assert_eq!(snapshots.len(), 1);
             let restored = checkpoint::git_cat_file_blob(&snapshots[0].pre_hash, repo.path()).unwrap();
             assert_eq!(String::from_utf8(restored).unwrap(), "original content");
-
-            // And the file currently has "second edit content"
-            let current = std::fs::read_to_string(&file_path).unwrap();
-            assert_eq!(current, "second edit content");
         }
+
+        // Second checkpoint: first edit → second edit
+        if let TranscriptEntry::Checkpoint { snapshots, .. } = &checkpoint_entries[1] {
+            assert_eq!(snapshots.len(), 1);
+            let restored = checkpoint::git_cat_file_blob(&snapshots[0].pre_hash, repo.path()).unwrap();
+            assert_eq!(String::from_utf8(restored).unwrap(), "first edit content");
+        }
+
+        // File currently has "second edit content"
+        let current = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(current, "second edit content");
     }
 
     #[tokio::test]
-    async fn checkpoint_tracks_shell_exec_flag() {
+    async fn shell_exec_detected_by_rewind_when_after_checkpoint() {
+        // file_write then shell_exec in same batch. Checkpoint is emitted
+        // immediately after file_write — before shell_exec runs — so the
+        // checkpoint's has_shell_exec is false. Rewind derives the warning
+        // from ToolCall entries in the removed range.
         let repo = setup_git_repo();
         let file_path = repo.path().join("test.txt");
 
@@ -1023,20 +1042,30 @@ mod tests {
 
         let agent = Agent::new(&mock, repo.path());
         let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "do it"})];
+        let (mut on_entry, collected) = collecting_entries();
 
-        let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+        agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
             .await
             .unwrap();
+        drop(on_entry);
 
-        let checkpoint_entries: Vec<_> = result.entries.iter()
+        let entries = collected.lock().unwrap();
+        let checkpoint_entries: Vec<_> = entries.iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
         assert_eq!(checkpoint_entries.len(), 1);
 
+        // Checkpoint was persisted before shell_exec executed
         if let TranscriptEntry::Checkpoint { has_shell_exec, .. } = &checkpoint_entries[0] {
-            assert!(has_shell_exec, "should flag shell_exec in mixed turn");
+            assert!(!has_shell_exec, "checkpoint emitted before shell_exec runs");
         }
+
+        // Rewind derives the warning from ToolCall entries
+        let has_shell_tool = entries.iter().any(|e| {
+            matches!(e, TranscriptEntry::ToolCall { name, .. } if name == "shell_exec")
+        });
+        assert!(has_shell_tool);
     }
 
     #[tokio::test]
@@ -1064,13 +1093,16 @@ mod tests {
 
         let agent = Agent::new(&mock, repo.path());
         let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "create"})];
+        let (mut on_entry, collected) = collecting_entries();
 
-        let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+        agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
             .await
             .unwrap();
+        drop(on_entry);
 
-        let checkpoint_entries: Vec<_> = result.entries.iter()
+        let entries = collected.lock().unwrap();
+        let checkpoint_entries: Vec<_> = entries.iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
         assert_eq!(checkpoint_entries.len(), 1, "new file in new dir should be checkpointed");
@@ -1085,7 +1117,8 @@ mod tests {
     async fn shell_exec_warning_across_iterations() {
         // Iteration 1: shell_exec only (no checkpoint emitted)
         // Iteration 2: file_write (checkpoint emitted)
-        // The checkpoint should carry has_shell_exec = true
+        // The checkpoint should carry has_shell_exec = true because
+        // shell_exec happened before the checkpoint was emitted
         let repo = setup_git_repo();
         let file_path = repo.path().join("test.txt");
 
@@ -1119,13 +1152,16 @@ mod tests {
 
         let agent = Agent::new(&mock, repo.path());
         let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "go"})];
+        let (mut on_entry, collected) = collecting_entries();
 
-        let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+        agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
             .await
             .unwrap();
+        drop(on_entry);
 
-        let checkpoint_entries: Vec<_> = result.entries.iter()
+        let entries = collected.lock().unwrap();
+        let checkpoint_entries: Vec<_> = entries.iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
         assert_eq!(checkpoint_entries.len(), 1);
@@ -1139,10 +1175,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shell_exec_warning_after_file_modification() {
-        // Iteration 1: file_write (checkpoint emitted with false)
+    async fn shell_exec_after_checkpoint_detected_by_rewind() {
+        // Iteration 1: file_write (checkpoint emitted with has_shell_exec=false)
         // Iteration 2: shell_exec only (no new checkpoint)
-        // The existing checkpoint should be retroactively patched to true
+        // With incremental streaming, the checkpoint can't be retroactively patched.
+        // Rewind derives shell_exec by scanning ToolCall entries instead.
         let repo = setup_git_repo();
         let file_path = repo.path().join("test.txt");
 
@@ -1176,28 +1213,40 @@ mod tests {
 
         let agent = Agent::new(&mock, repo.path());
         let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "go"})];
+        let (mut on_entry, collected) = collecting_entries();
 
-        let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+        agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
             .await
             .unwrap();
+        drop(on_entry);
 
-        let checkpoint_entries: Vec<_> = result.entries.iter()
+        let entries = collected.lock().unwrap();
+
+        // Checkpoint was emitted before shell_exec, so has_shell_exec is false
+        let checkpoint_entries: Vec<_> = entries.iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
         assert_eq!(checkpoint_entries.len(), 1);
-
         if let TranscriptEntry::Checkpoint { has_shell_exec, .. } = &checkpoint_entries[0] {
             assert!(
-                has_shell_exec,
-                "checkpoint should be retroactively patched with shell_exec from later iteration"
+                !has_shell_exec,
+                "checkpoint was emitted before shell_exec, so flag is false"
             );
         }
+
+        // But rewind should still detect shell_exec by scanning ToolCall entries
+        let has_shell_exec_tool = entries.iter().any(|e| {
+            matches!(e, TranscriptEntry::ToolCall { name, .. } if name == "shell_exec")
+        });
+        assert!(has_shell_exec_tool, "shell_exec ToolCall should be in the entries");
     }
 
     #[tokio::test]
-    async fn checkpoint_deduplicates_equivalent_paths() {
-        // Edit the same file via two different path representations
+    async fn checkpoint_equivalent_paths_each_get_own_checkpoint() {
+        // Edit the same file via two different path representations.
+        // Each gets its own checkpoint (persisted immediately for durability).
+        // Rewind processes them in reverse order to restore correctly.
         let repo = setup_git_repo();
         let file_path = repo.path().join("test.txt");
         std::fs::write(&file_path, "original content here").unwrap();
@@ -1238,28 +1287,103 @@ mod tests {
 
         let agent = Agent::new(&mock, repo.path());
         let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "edit"})];
+        let (mut on_entry, collected) = collecting_entries();
 
-        let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+        agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
             .await
             .unwrap();
+        drop(on_entry);
 
-        let checkpoint_entries: Vec<_> = result.entries.iter()
+        let entries = collected.lock().unwrap();
+        let checkpoint_entries: Vec<_> = entries.iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
-        assert_eq!(checkpoint_entries.len(), 1);
+        // Two checkpoints: one per edit (immediate persistence, no batched dedup)
+        assert_eq!(checkpoint_entries.len(), 2);
 
+        // First checkpoint: original → first edit
         if let TranscriptEntry::Checkpoint { snapshots, .. } = &checkpoint_entries[0] {
-            assert_eq!(
-                snapshots.len(),
-                1,
-                "test.txt and ./test.txt should dedup to one snapshot"
-            );
-
-            // pre_hash should point to original content
+            assert_eq!(snapshots.len(), 1);
             let restored = checkpoint::git_cat_file_blob(&snapshots[0].pre_hash, repo.path()).unwrap();
             assert_eq!(String::from_utf8(restored).unwrap(), "original content here");
         }
+    }
+
+    // --- Durability regression test ---
+
+    #[tokio::test]
+    async fn checkpoint_persisted_despite_later_api_failure() {
+        // Regression test: iteration 1 does file_write (checkpoint emitted via
+        // on_entry), iteration 2's send_turn fails. The on_entry callback should
+        // have received the checkpoint despite agent returning Err.
+        let repo = setup_git_repo();
+        let file_path = repo.path().join("test.txt");
+        std::fs::write(&file_path, "original content").unwrap();
+
+        // Only one response: file_edit tool call. Second send_turn will fail
+        // because MockGrokApi has no more scripted responses.
+        let mock = MockGrokApi::new(vec![
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_1".into(),
+                    name: "file_edit".into(),
+                    arguments: format!(
+                        r#"{{"path": "{}", "old_string": "original", "new_string": "modified"}}"#,
+                        file_path.display()
+                    ),
+                }],
+                usage: None,
+            },
+            // No second response — send_turn will error
+        ]);
+
+        let agent = Agent::new(&mock, repo.path());
+        let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "edit"})];
+        let (mut on_entry, collected) = collecting_entries();
+
+        // Agent should return Err because second send_turn fails
+        let result = agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
+            .await;
+        drop(on_entry);
+
+        assert!(result.is_err(), "agent should fail when send_turn has no more responses");
+
+        // Despite the error, on_entry should have received entries including a checkpoint
+        let entries = collected.lock().unwrap();
+        let checkpoint_entries: Vec<_> = entries.iter()
+            .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
+            .collect();
+        assert_eq!(
+            checkpoint_entries.len(), 1,
+            "checkpoint should be emitted via on_entry before the API failure"
+        );
+
+        // Verify the checkpoint has valid snapshot data
+        if let TranscriptEntry::Checkpoint { snapshots, .. } = &checkpoint_entries[0] {
+            assert_eq!(snapshots.len(), 1);
+            assert_ne!(snapshots[0].pre_hash, snapshots[0].post_hash);
+        }
+
+        // Verify the file was actually modified (tool executed successfully)
+        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "modified content");
+
+        // Build a full history as main.rs would: user message + streamed entries
+        let mut history: Vec<TranscriptEntry> = Vec::new();
+        history.push(TranscriptEntry::user_message("edit"));
+        history.extend(entries.iter().cloned());
+
+        // /undo should be able to restore from the checkpoint
+        let undo_result = crate::rewind::undo_last_turn(
+            &history,
+            repo.path(),
+            crate::rewind::RewindMode::Both,
+        ).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "original content");
+        assert!(!undo_result.file_results.is_empty());
     }
 
     // --- History accumulation verification ---
@@ -1309,7 +1433,7 @@ mod tests {
         ];
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut noop_entry)
             .await
             .unwrap();
 

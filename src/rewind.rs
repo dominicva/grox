@@ -67,10 +67,17 @@ pub fn undo_last_turn(
     let truncate_to = last_user_idx;
 
     let mut file_results = Vec::new();
-    let mut had_shell_exec = false;
 
     // Track whether we're outside a git repo (for warning)
     let not_in_git = !checkpoint::is_git_repo(project_root);
+
+    // Derive shell_exec warning by scanning ToolCall entries in the removed range.
+    // This is more reliable than the checkpoint's has_shell_exec field, which only
+    // reflects knowledge at the time of emission (can't be retroactively patched
+    // when entries are streamed incrementally).
+    let had_shell_exec = entries[truncate_to..].iter().any(|e| {
+        matches!(e, TranscriptEntry::ToolCall { name, .. } if name == "shell_exec")
+    });
 
     // Restore files if mode includes code
     if mode != RewindMode::ConversationOnly {
@@ -88,15 +95,7 @@ pub fn undo_last_turn(
             .collect();
 
         for &cp_idx in checkpoints_in_range.iter().rev() {
-            if let TranscriptEntry::Checkpoint {
-                snapshots,
-                has_shell_exec,
-                ..
-            } = &entries[cp_idx]
-            {
-                if *has_shell_exec {
-                    had_shell_exec = true;
-                }
+            if let TranscriptEntry::Checkpoint { snapshots, .. } = &entries[cp_idx] {
                 for snapshot in snapshots {
                     file_results.push(checkpoint::restore_file(snapshot, project_root));
                 }
@@ -157,8 +156,12 @@ pub fn rewind_to_turn(
     let truncate_to = target_idx;
 
     let mut file_results = Vec::new();
-    let mut had_shell_exec = false;
     let not_in_git = !checkpoint::is_git_repo(project_root);
+
+    // Derive shell_exec warning from ToolCall entries in the removed range
+    let had_shell_exec = entries[truncate_to..].iter().any(|e| {
+        matches!(e, TranscriptEntry::ToolCall { name, .. } if name == "shell_exec")
+    });
 
     // Restore files from all checkpoints in the removed range (reverse order)
     if mode != RewindMode::ConversationOnly {
@@ -173,15 +176,7 @@ pub fn rewind_to_turn(
             .collect();
 
         for &cp_idx in checkpoints_in_range.iter().rev() {
-            if let TranscriptEntry::Checkpoint {
-                snapshots,
-                has_shell_exec,
-                ..
-            } = &entries[cp_idx]
-            {
-                if *has_shell_exec {
-                    had_shell_exec = true;
-                }
+            if let TranscriptEntry::Checkpoint { snapshots, .. } = &entries[cp_idx] {
                 for snapshot in snapshots {
                     file_results.push(checkpoint::restore_file(snapshot, project_root));
                 }
@@ -290,13 +285,20 @@ mod tests {
         snapshots: Vec<FileSnapshot>,
         has_shell_exec: bool,
     ) -> Vec<TranscriptEntry> {
-        vec![
+        let mut entries = vec![
             TranscriptEntry::user_message(user_msg),
             TranscriptEntry::tool_call("c1", "file_write", r#"{"path":"test.txt"}"#),
             TranscriptEntry::tool_result("c1", "file_write", "ok"),
-            TranscriptEntry::checkpoint(snapshots, has_shell_exec),
-            TranscriptEntry::assistant_message("Done"),
-        ]
+        ];
+        // If shell_exec is flagged, include a shell_exec ToolCall entry
+        // (rewind derives the warning from ToolCall entries, not the checkpoint field)
+        if has_shell_exec {
+            entries.push(TranscriptEntry::tool_call("c_sh", "shell_exec", r#"{"command":"echo hi"}"#));
+            entries.push(TranscriptEntry::tool_result("c_sh", "shell_exec", "hi"));
+        }
+        entries.push(TranscriptEntry::checkpoint(snapshots, has_shell_exec));
+        entries.push(TranscriptEntry::assistant_message("Done"));
+        entries
     }
 
     // --- count_turns ---
@@ -490,7 +492,7 @@ mod tests {
     #[test]
     fn undo_multi_checkpoint_shell_exec_in_earlier_iteration() {
         // shell_exec happens in first iteration, file_write in second.
-        // undo should still see the shell_exec warning.
+        // undo should still see the shell_exec warning (derived from ToolCall entries).
         let repo = setup_git_repo();
         let file = repo.path().join("test.txt");
         std::fs::write(&file, "original").unwrap();
@@ -500,7 +502,10 @@ mod tests {
 
         let entries = vec![
             TranscriptEntry::user_message("do stuff"),
-            // First iteration: shell_exec + file_write
+            // First iteration: shell_exec
+            TranscriptEntry::tool_call("c0", "shell_exec", r#"{"command":"echo hi"}"#),
+            TranscriptEntry::tool_result("c0", "shell_exec", "hi"),
+            // Second iteration: file_write
             TranscriptEntry::tool_call("c1", "file_write", r#"{"path":"test.txt"}"#),
             TranscriptEntry::tool_result("c1", "file_write", "ok"),
             TranscriptEntry::checkpoint(
@@ -509,13 +514,13 @@ mod tests {
                     pre_hash: pre,
                     post_hash: post,
                 }],
-                true, // has_shell_exec from this iteration
+                false, // checkpoint doesn't know about earlier shell_exec
             ),
             TranscriptEntry::assistant_message("Done"),
         ];
 
         let result = undo_last_turn(&entries, repo.path(), RewindMode::Both).unwrap();
-        assert!(result.had_shell_exec);
+        assert!(result.had_shell_exec, "should derive shell_exec from ToolCall entries");
     }
 
     // --- rewind_to_turn ---
