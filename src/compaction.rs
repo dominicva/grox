@@ -227,6 +227,17 @@ pub async fn llm_compact(
         single_summarize(old_entries, api).await?
     };
 
+    // Validate that the summary actually reduces context size.
+    // A verbose or malformed summary could be larger than the original.
+    let summary_tokens = summary.len() / 4;
+    if summary_tokens >= old_tokens {
+        return Ok(CompactionResult {
+            entries: entries.to_vec(),
+            compacted: false,
+            llm_usage: usage,
+        });
+    }
+
     let mut result = vec![TranscriptEntry::compaction_summary(&summary)];
     result.extend_from_slice(recent_entries);
 
@@ -467,6 +478,13 @@ mod tests {
     // -----------------------------------------------------------------------
     // Helper: build a multi-turn transcript for testing
     // -----------------------------------------------------------------------
+
+    /// Build a turn with substantial content (for LLM compaction tests where
+    /// old entries need to be larger than any summary).
+    fn big_turn(i: usize) -> Vec<TranscriptEntry> {
+        let content = format!("message {i}: {}", "x".repeat(200));
+        simple_turn(&content, &content)
+    }
 
     /// Build a simple turn: user message + assistant response
     fn simple_turn(user_msg: &str, assistant_msg: &str) -> Vec<TranscriptEntry> {
@@ -1197,7 +1215,7 @@ mod tests {
 
         let mut entries: Vec<TranscriptEntry> = Vec::new();
         for i in 0..8 {
-            entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
+            entries.extend(big_turn(i));
         }
 
         let result = llm_compact(&entries, "grok-3", &mock).await.unwrap();
@@ -1226,7 +1244,7 @@ mod tests {
 
         let mut entries: Vec<TranscriptEntry> = Vec::new();
         for i in 0..8 {
-            entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
+            entries.extend(big_turn(i));
         }
 
         let result = llm_compact(&entries, "grok-3", &mock).await.unwrap();
@@ -1265,7 +1283,7 @@ mod tests {
 
         let mut entries: Vec<TranscriptEntry> = Vec::new();
         for i in 0..8 {
-            entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
+            entries.extend(big_turn(i));
         }
 
         let result = llm_compact(&entries, "grok-3", &mock).await.unwrap();
@@ -1274,6 +1292,32 @@ mod tests {
         } else {
             panic!("First entry should be CompactionSummary");
         }
+    }
+
+    #[tokio::test]
+    async fn llm_compact_rejects_verbose_summary() {
+        use crate::api::TurnResponse;
+        use crate::api::mock::MockGrokApi;
+
+        // The model returns a summary that's LARGER than the old entries
+        let verbose_summary = "x".repeat(10_000);
+        let mock = MockGrokApi::new(vec![TurnResponse {
+            text: verbose_summary,
+            tool_calls: vec![],
+            usage: Some(crate::api::Usage { input_tokens: 500, output_tokens: 5000 }),
+        }]);
+
+        // Small old entries — summary will be bigger
+        let mut entries: Vec<TranscriptEntry> = Vec::new();
+        for i in 0..8 {
+            entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
+        }
+
+        let result = llm_compact(&entries, "grok-3", &mock).await.unwrap();
+        // Should reject the summary since it's larger
+        assert!(!result.compacted, "should reject verbose summary");
+        // Usage should still be reported (tokens were consumed)
+        assert!(result.llm_usage.is_some());
     }
 
     // -----------------------------------------------------------------------
@@ -1347,10 +1391,10 @@ mod tests {
             },
         ]);
 
-        // Small entries — well below 80% of context window
+        // Entries with enough content so summary is smaller, but below 80% of context window
         let mut entries: Vec<TranscriptEntry> = Vec::new();
         for i in 0..8 {
-            entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
+            entries.extend(big_turn(i));
         }
 
         let result = llm_compact(&entries, "grok-3", &mock).await.unwrap();
