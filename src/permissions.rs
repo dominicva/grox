@@ -69,7 +69,7 @@ impl SessionPermissions {
     pub fn classify_tool(&self, tool_name: &str, arguments: &str) -> ToolCategory {
         match tool_name {
             "file_read" | "list_files" | "grep" => ToolCategory::Read,
-            "file_write" => {
+            "file_write" | "file_edit" => {
                 let path = extract_path(arguments);
                 if self.is_inside_project(&path) {
                     ToolCategory::WriteInProject
@@ -451,6 +451,41 @@ mod tests {
         // File in subdir: still prompts (different dir)
         let args_sub = format!(r#"{{"path":"{}"}}"#, sub.join("file.txt").display());
         assert!(matches!(p.check("file_write", &args_sub), PermissionCheck::Prompt { .. }));
+    }
+
+    // --- file_edit permission tests ---
+
+    #[test]
+    fn file_edit_classified_same_as_file_write_in_project() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        let args = format!(r#"{{"path":"{}","old_string":"a","new_string":"b"}}"#, file_path.display());
+        let p = perms_with_root(PermissionMode::Trust, dir.path().to_path_buf());
+        assert_eq!(p.classify_tool("file_edit", &args), ToolCategory::WriteInProject);
+        assert_eq!(p.check("file_edit", &args), PermissionCheck::Allow);
+    }
+
+    #[test]
+    fn file_edit_outside_project_prompts() {
+        let dir = tempdir().unwrap();
+        let other = tempdir().unwrap();
+        let file_path = other.path().join("escape.txt");
+        let args = format!(r#"{{"path":"{}","old_string":"a","new_string":"b"}}"#, file_path.display());
+        let p = perms_with_root(PermissionMode::Trust, dir.path().to_path_buf());
+        assert_eq!(p.classify_tool("file_edit", &args), ToolCategory::WriteOutsideProject);
+        assert!(matches!(p.check("file_edit", &args), PermissionCheck::Prompt { .. }));
+    }
+
+    #[test]
+    fn file_edit_readonly_denied() {
+        let p = perms(PermissionMode::ReadOnly);
+        assert_eq!(p.check("file_edit", r#"{"path":"x","old_string":"a","new_string":"b"}"#), PermissionCheck::Deny);
+    }
+
+    #[test]
+    fn file_edit_yolo_allowed() {
+        let p = perms(PermissionMode::Yolo);
+        assert_eq!(p.check("file_edit", r#"{"path":"x","old_string":"a","new_string":"b"}"#), PermissionCheck::Allow);
     }
 
     // --- Destructive pattern detection ---
