@@ -158,9 +158,16 @@ pub fn rewind_to_turn(
 
     let mut file_results = Vec::new();
     let mut had_shell_exec = false;
+    let not_in_git = !checkpoint::is_git_repo(project_root);
 
     // Restore files from all checkpoints in the removed range (reverse order)
     if mode != RewindMode::ConversationOnly {
+        if mode == RewindMode::CodeOnly && not_in_git {
+            return Err(
+                "not in a git repo — cannot restore code changes".to_string(),
+            );
+        }
+
         let checkpoints_in_range: Vec<usize> = (truncate_to..entries.len())
             .filter(|&i| matches!(&entries[i], TranscriptEntry::Checkpoint { .. }))
             .collect();
@@ -196,7 +203,7 @@ pub fn rewind_to_turn(
         file_results,
         had_shell_exec,
         entries_removed,
-        not_in_git: false, // rewind_to_turn doesn't currently check, but could be added
+        not_in_git,
     })
 }
 
@@ -552,6 +559,45 @@ mod tests {
         let result = rewind_to_turn(&[], 0, Path::new("/tmp"), RewindMode::ConversationOnly);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("must be >= 1"));
+    }
+
+    #[test]
+    fn rewind_to_turn_non_git_both_mode() {
+        let dir = tempfile::tempdir().unwrap(); // not a git repo
+        let mut entries = Vec::new();
+        entries.extend(simple_turn("q1", "a1"));
+        entries.extend(simple_turn("q2", "a2"));
+        entries.extend(simple_turn("q3", "a3"));
+
+        let result = rewind_to_turn(&entries, 2, dir.path(), RewindMode::Both).unwrap();
+        assert_eq!(result.entries.len(), 2); // q1 + a1
+        assert!(result.not_in_git);
+    }
+
+    #[test]
+    fn rewind_to_turn_non_git_code_only_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut entries = Vec::new();
+        entries.extend(simple_turn("q1", "a1"));
+        entries.extend(simple_turn("q2", "a2"));
+
+        let result = rewind_to_turn(&entries, 1, dir.path(), RewindMode::CodeOnly);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not in a git repo"));
+    }
+
+    #[test]
+    fn rewind_to_turn_non_git_conversation_only_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut entries = Vec::new();
+        entries.extend(simple_turn("q1", "a1"));
+        entries.extend(simple_turn("q2", "a2"));
+
+        let result =
+            rewind_to_turn(&entries, 2, dir.path(), RewindMode::ConversationOnly).unwrap();
+        assert_eq!(result.entries.len(), 2);
+        // not_in_git is true (we're not in a git repo), but operation succeeds
+        assert!(result.not_in_git);
     }
 
     #[test]
