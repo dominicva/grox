@@ -123,21 +123,27 @@ impl<'a> Agent<'a> {
                 }));
                 entries.push(tc_entry);
 
-                // Snapshot file before modification (checkpoint)
-                let pre_hash = if self.checkpoint_enabled
-                    && CHECKPOINTED_TOOLS.contains(&tc.name.as_str())
-                {
+                // Check permission before executing
+                let authorized = on_authorize(&tc.name, &tc.arguments);
+                let is_checkpointed = self.checkpoint_enabled
+                    && authorized
+                    && CHECKPOINTED_TOOLS.contains(&tc.name.as_str());
+
+                // Snapshot file AFTER authorization but BEFORE execution.
+                // Path is validated against project root to prevent reading
+                // out-of-project files via git hash-object.
+                let pre_hash = if is_checkpointed {
                     checkpoint::extract_tool_path(&tc.arguments).and_then(|path| {
                         let abs_path =
                             checkpoint::resolve_checkpoint_path(&path, &self.project_root);
+                        // Only snapshot paths inside the project root
+                        crate::util::validate_path(&abs_path, &self.project_root).ok()?;
                         checkpoint::snapshot_pre(&abs_path, &self.project_root).ok()
                     })
                 } else {
                     None
                 };
 
-                // Check permission before executing
-                let authorized = on_authorize(&tc.name, &tc.arguments);
                 let output = if !authorized {
                     "Permission denied by user".to_string()
                 } else {
@@ -158,19 +164,17 @@ impl<'a> Agent<'a> {
 
                 // Snapshot file after modification (checkpoint)
                 if let Some(pre) = pre_hash {
-                    if authorized {
-                        if let Some(path) = checkpoint::extract_tool_path(&tc.arguments) {
-                            let abs_path =
-                                checkpoint::resolve_checkpoint_path(&path, &self.project_root);
-                            if let Ok(post) =
-                                checkpoint::snapshot_post(&abs_path, &self.project_root)
-                            {
-                                snapshots.push(FileSnapshot {
-                                    path: abs_path.display().to_string(),
-                                    pre_hash: pre,
-                                    post_hash: post,
-                                });
-                            }
+                    if let Some(path) = checkpoint::extract_tool_path(&tc.arguments) {
+                        let abs_path =
+                            checkpoint::resolve_checkpoint_path(&path, &self.project_root);
+                        if let Ok(post) =
+                            checkpoint::snapshot_post(&abs_path, &self.project_root)
+                        {
+                            snapshots.push(FileSnapshot {
+                                path: abs_path.display().to_string(),
+                                pre_hash: pre,
+                                post_hash: post,
+                            });
                         }
                     }
                 }
@@ -838,6 +842,46 @@ mod tests {
             .await
             .unwrap();
 
+        let checkpoint_entries: Vec<_> = result.entries.iter()
+            .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
+            .collect();
+        assert_eq!(checkpoint_entries.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn no_checkpoint_for_out_of_project_path() {
+        let repo = setup_git_repo();
+        // Create a file outside the project root
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside_file = outside_dir.path().join("secret.txt");
+        std::fs::write(&outside_file, "secret data").unwrap();
+
+        let mock = MockGrokApi::new(vec![
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_1".into(),
+                    name: "file_write".into(),
+                    arguments: format!(r#"{{"path": "{}", "content": "overwrite"}}"#, outside_file.display()),
+                }],
+                usage: None,
+            },
+            TurnResponse {
+                text: "Done.".into(),
+                tool_calls: vec![],
+                usage: None,
+            },
+        ]);
+
+        let agent = Agent::new(&mock, repo.path());
+        let input = vec![json!({"role": "user", "content": "write outside"})];
+
+        let result = agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+            .await
+            .unwrap();
+
+        // Should have no checkpoint — path is outside project root
         let checkpoint_entries: Vec<_> = result.entries.iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
