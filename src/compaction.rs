@@ -1,6 +1,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use anyhow::Result;
+use serde_json::json;
+
+use crate::api::GrokApi;
 use crate::context_assembler::ContextAssembler;
 use crate::model_profile::ModelProfile;
 use crate::session::TranscriptEntry;
@@ -159,6 +163,110 @@ pub fn heuristic_compact(entries: &[TranscriptEntry], project_root: &Path) -> Co
         compacted,
         llm_usage: None,
     }
+}
+
+/// Run LLM-based compaction on transcript entries.
+///
+/// Sends the old entries (before the recent boundary) to the model for
+/// structured summarization. The summary replaces all older messages,
+/// with recent turns preserved verbatim.
+///
+/// If the old entries exceed 80% of the model's context window, uses
+/// chunked summarization: summarize the older half first, then combine
+/// with the newer half in a second pass.
+pub async fn llm_compact(
+    entries: &[TranscriptEntry],
+    model: &str,
+    api: &dyn GrokApi,
+) -> Result<CompactionResult> {
+    let profile = ModelProfile::for_model(model);
+    let boundary = find_recent_boundary(entries, RECENT_TURNS);
+
+    if boundary == 0 {
+        return Ok(CompactionResult {
+            entries: entries.to_vec(),
+            compacted: false,
+            llm_usage: None,
+        });
+    }
+
+    let old_entries = &entries[..boundary];
+    let recent_entries = &entries[boundary..];
+
+    // Check if we need chunked summarization (old entries exceed 80% of context)
+    let old_tokens: usize = old_entries.iter().map(|e| e.token_estimate()).sum();
+    let overflow_threshold = profile.context_window * 80 / 100;
+
+    let (summary, usage) = if old_tokens > overflow_threshold {
+        chunked_summarize(old_entries, api).await?
+    } else {
+        single_summarize(old_entries, api).await?
+    };
+
+    let mut result = vec![TranscriptEntry::compaction_summary(&summary)];
+    result.extend_from_slice(recent_entries);
+
+    Ok(CompactionResult {
+        entries: result,
+        compacted: true,
+        llm_usage: usage,
+    })
+}
+
+/// Summarize entries in a single API call.
+async fn single_summarize(
+    entries: &[TranscriptEntry],
+    api: &dyn GrokApi,
+) -> Result<(String, Option<crate::api::Usage>)> {
+    let formatted = format_entries_for_summarization(entries);
+    let messages = vec![
+        json!({"role": "system", "content": SUMMARIZATION_PROMPT}),
+        json!({"role": "user", "content": format!("Summarize this conversation:\n\n{formatted}")}),
+    ];
+
+    let response = api.send_turn(messages, &[], &mut |_| {}).await?;
+    Ok((response.text, response.usage))
+}
+
+/// Summarize entries in two passes when they exceed context limits.
+///
+/// First pass: summarize the older half of the entries.
+/// Second pass: combine the first summary with the newer half.
+async fn chunked_summarize(
+    entries: &[TranscriptEntry],
+    api: &dyn GrokApi,
+) -> Result<(String, Option<crate::api::Usage>)> {
+    let midpoint = entries.len() / 2;
+    let older_half = &entries[..midpoint];
+    let newer_half = &entries[midpoint..];
+
+    // First pass: summarize the older half
+    let (first_summary, first_usage) = single_summarize(older_half, api).await?;
+
+    // Second pass: combine first summary with newer half
+    let newer_formatted = format_entries_for_summarization(newer_half);
+    let messages = vec![
+        json!({"role": "system", "content": SUMMARIZATION_PROMPT}),
+        json!({"role": "user", "content": format!(
+            "Combine this earlier summary with the newer conversation into a single summary.\n\n\
+             Earlier summary:\n{first_summary}\n\n\
+             Newer conversation:\n{newer_formatted}"
+        )}),
+    ];
+
+    let second_response = api.send_turn(messages, &[], &mut |_| {}).await?;
+
+    // Combine usage from both passes
+    let combined_usage = match (first_usage, second_response.usage) {
+        (Some(u1), Some(u2)) => Some(crate::api::Usage {
+            input_tokens: u1.input_tokens + u2.input_tokens,
+            output_tokens: u1.output_tokens + u2.output_tokens,
+        }),
+        (Some(u), None) | (None, Some(u)) => Some(u),
+        (None, None) => None,
+    };
+
+    Ok((second_response.text, combined_usage))
 }
 
 /// Find the index in `entries` where the recent region begins.
@@ -1000,6 +1108,102 @@ mod tests {
 
         let result = maybe_compact(&entries, &assembler, "grok-3", Path::new("/project"));
         assert!(result.is_none(), "should return None when above threshold but nothing compactable");
+    }
+
+    // -----------------------------------------------------------------------
+    // llm_compact
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn llm_compact_replaces_old_entries_with_summary() {
+        use crate::api::TurnResponse;
+        use crate::api::mock::MockGrokApi;
+
+        let mock = MockGrokApi::new(vec![TurnResponse {
+            text: "## Primary Request\nUser wanted help.\n\n## Technical Concepts\nNone.".into(),
+            tool_calls: vec![],
+            usage: Some(crate::api::Usage { input_tokens: 500, output_tokens: 200 }),
+        }]);
+
+        let mut entries: Vec<TranscriptEntry> = Vec::new();
+        for i in 0..8 {
+            entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
+        }
+
+        let result = llm_compact(&entries, "grok-3", &mock).await.unwrap();
+        assert!(result.compacted);
+
+        // Should have CompactionSummary + recent 5 turns (10 entries)
+        assert!(matches!(&result.entries[0], TranscriptEntry::CompactionSummary { summary, .. } if summary.contains("Primary Request")));
+
+        // Recent entries should be preserved verbatim
+        let recent_user_msgs: Vec<_> = result.entries.iter().filter(|e| {
+            matches!(e, TranscriptEntry::UserMessage { .. })
+        }).collect();
+        assert_eq!(recent_user_msgs.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn llm_compact_returns_usage() {
+        use crate::api::TurnResponse;
+        use crate::api::mock::MockGrokApi;
+
+        let mock = MockGrokApi::new(vec![TurnResponse {
+            text: "Summary.".into(),
+            tool_calls: vec![],
+            usage: Some(crate::api::Usage { input_tokens: 1000, output_tokens: 300 }),
+        }]);
+
+        let mut entries: Vec<TranscriptEntry> = Vec::new();
+        for i in 0..8 {
+            entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
+        }
+
+        let result = llm_compact(&entries, "grok-3", &mock).await.unwrap();
+        let usage = result.llm_usage.unwrap();
+        assert_eq!(usage.input_tokens, 1000);
+        assert_eq!(usage.output_tokens, 300);
+    }
+
+    #[tokio::test]
+    async fn llm_compact_no_op_when_all_recent() {
+        use crate::api::mock::MockGrokApi;
+
+        let mock = MockGrokApi::new(vec![]);
+
+        let entries: Vec<TranscriptEntry> = (0..3)
+            .flat_map(|i| simple_turn(&format!("q{i}"), &format!("a{i}")))
+            .collect();
+
+        let result = llm_compact(&entries, "grok-3", &mock).await.unwrap();
+        assert!(!result.compacted);
+        assert!(result.llm_usage.is_none());
+        assert_eq!(result.entries.len(), entries.len());
+    }
+
+    #[tokio::test]
+    async fn llm_compact_summary_token_estimate_matches_content() {
+        use crate::api::TurnResponse;
+        use crate::api::mock::MockGrokApi;
+
+        let summary_text = "A detailed summary of the conversation.";
+        let mock = MockGrokApi::new(vec![TurnResponse {
+            text: summary_text.into(),
+            tool_calls: vec![],
+            usage: None,
+        }]);
+
+        let mut entries: Vec<TranscriptEntry> = Vec::new();
+        for i in 0..8 {
+            entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
+        }
+
+        let result = llm_compact(&entries, "grok-3", &mock).await.unwrap();
+        if let TranscriptEntry::CompactionSummary { token_estimate, .. } = &result.entries[0] {
+            assert_eq!(*token_estimate, summary_text.len() / 4);
+        } else {
+            panic!("First entry should be CompactionSummary");
+        }
     }
 
     // -----------------------------------------------------------------------
