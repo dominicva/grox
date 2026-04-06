@@ -133,6 +133,21 @@ impl Transcript {
         Self { path: path.into() }
     }
 
+    /// Create the transcript file on disk (and parent directories) if it doesn't exist.
+    /// This ensures the file exists at session startup, not just on first append.
+    pub fn create(&self) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+        }
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .with_context(|| format!("Failed to create transcript: {}", self.path.display()))?;
+        Ok(())
+    }
+
     #[allow(dead_code)] // Used in Phase 8 (session resume)
     pub fn path(&self) -> &Path {
         &self.path
@@ -580,6 +595,35 @@ mod tests {
 
         transcript.append(&TranscriptEntry::user_message("hello")).unwrap();
         assert!(path.exists());
+    }
+
+    #[test]
+    fn create_makes_empty_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sessions").join("new.jsonl");
+        let transcript = Transcript::new(&path);
+
+        assert!(!path.exists());
+        transcript.create().unwrap();
+        assert!(path.exists());
+
+        // File should be empty and readable
+        let entries = transcript.read_all().unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn create_is_idempotent() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("idem.jsonl");
+        let transcript = Transcript::new(&path);
+
+        transcript.create().unwrap();
+        transcript.append(&TranscriptEntry::user_message("hello")).unwrap();
+        transcript.create().unwrap(); // should not truncate
+
+        let entries = transcript.read_all().unwrap();
+        assert_eq!(entries.len(), 1);
     }
 
     // --- SessionMeta ---

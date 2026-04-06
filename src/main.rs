@@ -91,6 +91,7 @@ async fn main() -> Result<()> {
     let transcript = Transcript::new(
         SessionMeta::transcript_path(&sessions_dir, &session_meta.session_id),
     );
+    transcript.create()?;
     session_meta.save(&sessions_dir)?;
 
     println!("{}", "grox — agentic coding with Grok".bold());
