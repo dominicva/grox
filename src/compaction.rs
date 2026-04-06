@@ -496,7 +496,8 @@ fn format_entries_for_summarization(entries: &[TranscriptEntry]) -> String {
             TranscriptEntry::CompactionSummary { summary, .. } => {
                 text.push_str(&format!("Previous summary: {summary}\n\n"));
             }
-            TranscriptEntry::SystemEvent { .. } => {}
+            TranscriptEntry::SystemEvent { .. }
+            | TranscriptEntry::Checkpoint { .. } => {}
         }
     }
     text

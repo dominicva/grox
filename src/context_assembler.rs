@@ -90,7 +90,8 @@ impl ContextAssembler {
                         "content": format!("[Context summary from earlier in this conversation]\n\n{summary}"),
                     }));
                 }
-                TranscriptEntry::SystemEvent { .. } => {
+                TranscriptEntry::SystemEvent { .. }
+                | TranscriptEntry::Checkpoint { .. } => {
                     // Internal bookkeeping — not sent to the model
                 }
             }

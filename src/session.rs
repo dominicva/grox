@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::checkpoint::FileSnapshot;
+
 /// Fsync a directory to ensure rename durability on crash.
 fn sync_directory(dir: &Path) -> Result<()> {
     let f = std::fs::File::open(dir)
@@ -54,6 +56,11 @@ pub enum TranscriptEntry {
         event: String,
         token_estimate: usize,
     },
+    Checkpoint {
+        snapshots: Vec<FileSnapshot>,
+        has_shell_exec: bool,
+        token_estimate: usize,
+    },
 }
 
 impl TranscriptEntry {
@@ -64,7 +71,8 @@ impl TranscriptEntry {
             | Self::ToolCall { token_estimate, .. }
             | Self::ToolResult { token_estimate, .. }
             | Self::CompactionSummary { token_estimate, .. }
-            | Self::SystemEvent { token_estimate, .. } => *token_estimate,
+            | Self::SystemEvent { token_estimate, .. }
+            | Self::Checkpoint { token_estimate, .. } => *token_estimate,
         }
     }
 
@@ -114,6 +122,16 @@ impl TranscriptEntry {
         let event = event.into();
         let token_estimate = event.len() / 4;
         Self::SystemEvent { event, token_estimate }
+    }
+
+    /// Create a Checkpoint with auto-calculated token estimate.
+    pub fn checkpoint(snapshots: Vec<FileSnapshot>, has_shell_exec: bool) -> Self {
+        // Estimate based on serialized snapshot data
+        let content_len: usize = snapshots.iter().map(|s| {
+            s.path.len() + s.pre_hash.len() + s.post_hash.len()
+        }).sum();
+        let token_estimate = content_len / 4;
+        Self::Checkpoint { snapshots, has_shell_exec, token_estimate }
     }
 }
 
@@ -389,6 +407,7 @@ impl SessionIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checkpoint::FileSnapshot;
     use tempfile::tempdir;
 
     // --- TranscriptEntry ---
@@ -434,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn all_six_variants_serialize_roundtrip() {
+    fn all_variants_serialize_roundtrip() {
         let entries = vec![
             TranscriptEntry::user_message("hello"),
             TranscriptEntry::assistant_message("hi there"),
@@ -442,6 +461,14 @@ mod tests {
             TranscriptEntry::tool_result("c1", "grep", "src/lib.rs:10: foo"),
             TranscriptEntry::compaction_summary("Summary of conversation so far."),
             TranscriptEntry::system_event("session started"),
+            TranscriptEntry::checkpoint(
+                vec![FileSnapshot {
+                    path: "src/main.rs".to_string(),
+                    pre_hash: "abc123".to_string(),
+                    post_hash: "def456".to_string(),
+                }],
+                false,
+            ),
         ];
 
         for entry in &entries {
@@ -460,6 +487,66 @@ mod tests {
         let tool = TranscriptEntry::tool_call("c1", "grep", "{}");
         let json = serde_json::to_string(&tool).unwrap();
         assert!(json.contains(r#""type":"ToolCall""#));
+    }
+
+    // --- Checkpoint ---
+
+    #[test]
+    fn checkpoint_token_estimate() {
+        let entry = TranscriptEntry::checkpoint(
+            vec![FileSnapshot {
+                path: "src/main.rs".to_string(),      // 11
+                pre_hash: "a".repeat(40),              // 40
+                post_hash: "b".repeat(40),             // 40
+            }],
+            false,
+        );
+        assert_eq!(entry.token_estimate(), (11 + 40 + 40) / 4);
+    }
+
+    #[test]
+    fn checkpoint_serde_tag() {
+        let entry = TranscriptEntry::checkpoint(vec![], false);
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains(r#""type":"Checkpoint""#));
+    }
+
+    #[test]
+    fn checkpoint_with_shell_exec_flag() {
+        let entry = TranscriptEntry::checkpoint(vec![], true);
+        if let TranscriptEntry::Checkpoint { has_shell_exec, .. } = entry {
+            assert!(has_shell_exec);
+        } else {
+            panic!("Expected Checkpoint variant");
+        }
+    }
+
+    #[test]
+    fn checkpoint_jsonl_roundtrip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("checkpoint.jsonl");
+        let transcript = Transcript::new(&path);
+
+        let entry = TranscriptEntry::checkpoint(
+            vec![
+                FileSnapshot {
+                    path: "src/a.rs".to_string(),
+                    pre_hash: "aaa".to_string(),
+                    post_hash: "bbb".to_string(),
+                },
+                FileSnapshot {
+                    path: "src/b.rs".to_string(),
+                    pre_hash: "created".to_string(),
+                    post_hash: "ccc".to_string(),
+                },
+            ],
+            true,
+        );
+
+        transcript.append(&entry).unwrap();
+        let loaded = transcript.read_all().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0], entry);
     }
 
     // --- Transcript JSONL ---
