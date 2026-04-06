@@ -604,6 +604,98 @@ mod tests {
     // Mixed turn: file tools + shell_exec both compacted
     // -----------------------------------------------------------------------
 
+    // -----------------------------------------------------------------------
+    // Preflight integration: compaction reduces token estimate
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn preflight_compaction_reduces_estimate_below_threshold() {
+        use crate::context_assembler::ContextAssembler;
+        use crate::model_profile::ModelProfile;
+        use serde_json::json;
+
+        let assembler = ContextAssembler::new(json!({"role": "system", "content": "short"}));
+        let profile = ModelProfile::for_model("grok-3");
+        let threshold = profile.compaction_threshold(); // 48,000
+
+        // Build a transcript with large tool results that exceed the threshold
+        let big_output = "x".repeat(threshold * 4 + 1000); // well over threshold in chars
+        let mut entries = tool_turn(
+            "q0",
+            "file_read",
+            r#"{"path":"huge.rs"}"#,
+            "c0",
+            &big_output,
+            "a0",
+        );
+        for i in 1..=5 {
+            entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
+        }
+
+        let before = assembler.estimate_tokens(&entries);
+        assert!(before > threshold, "setup: should exceed threshold");
+
+        let result = heuristic_compact(&entries);
+        assert!(result.compacted);
+
+        let after = assembler.estimate_tokens(&result.entries);
+        assert!(after < before, "compaction should reduce token estimate");
+    }
+
+    // -----------------------------------------------------------------------
+    // file_write and file_edit placeholders
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn old_file_write_result_replaced_with_placeholder() {
+        let mut entries = tool_turn(
+            "q0",
+            "file_write",
+            r#"{"path":"out.txt","content":"hello world"}"#,
+            "c0",
+            "File written successfully (11 bytes).",
+            "a0",
+        );
+        for i in 1..=5 {
+            entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
+        }
+
+        let result = heuristic_compact(&entries);
+        let tr = result.entries.iter().find(|e| {
+            matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c0")
+        });
+        if let Some(TranscriptEntry::ToolResult { output, .. }) = tr {
+            assert_eq!(output, "[file_write: out.txt]");
+        }
+    }
+
+    #[test]
+    fn old_file_edit_result_replaced_with_placeholder() {
+        let mut entries = tool_turn(
+            "q0",
+            "file_edit",
+            r#"{"path":"src/lib.rs","old_string":"foo","new_string":"bar"}"#,
+            "c0",
+            "Edit applied. Context:\n  bar\n  baz",
+            "a0",
+        );
+        for i in 1..=5 {
+            entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
+        }
+
+        let result = heuristic_compact(&entries);
+        let tr = result.entries.iter().find(|e| {
+            matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c0")
+        });
+        if let Some(TranscriptEntry::ToolResult { output, .. }) = tr {
+            assert_eq!(output, "[file_edit: src/lib.rs]");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Mixed turn: file tools + shell_exec both compacted
+    // -----------------------------------------------------------------------
+
     #[test]
     fn mixed_turn_both_tools_compacted() {
         let long_output = (0..20).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
