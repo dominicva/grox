@@ -4,6 +4,7 @@ mod model_profile;
 mod permissions;
 mod prompt;
 mod repo_context;
+mod session;
 mod tools;
 mod util;
 
