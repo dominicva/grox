@@ -45,7 +45,7 @@ This does not apply to code — write code as clearly as needed."
 fn working_with_code_section() -> String {
     "# Working with code
 
-- Read before modifying. Understand existing code before suggesting changes.
+- Read before modifying. Before changing a file, read it and its surrounding context — how is it used, what patterns does it follow, what else lives nearby.
 - Do not add features, refactoring, or improvements beyond what was asked.
 - Do not create files unless necessary. Prefer editing existing files.
 - Do not add comments, docstrings, or type annotations to code you didn't change.
@@ -57,7 +57,7 @@ fn working_with_code_section() -> String {
 fn taking_action_section() -> String {
     "# Taking action
 
-Reads are free — explore the codebase proactively with file_read, list_files, and grep to gather context before answering. Don't guess when you can look.
+Before making changes, build understanding. Read the files you plan to modify, check how similar things are done nearby, and look at the structure around your target. A few extra reads upfront prevent wrong turns that waste far more time. Reads are free — don't guess at patterns, conventions, or file locations when you can look.
 
 Writes and shell commands have consequences. Think before executing. For destructive operations — deleting files, force-pushing, dropping tables, rm -rf — pause and consider whether this is really the right action. If you encounter unexpected state like unfamiliar files or configuration, investigate before overwriting. It may be the user's in-progress work.
 
@@ -137,6 +137,12 @@ mod tests {
     fn identity_is_first_section() {
         let prompt = build_system_prompt(Path::new("/test"), None);
         assert!(prompt.starts_with("You are Grox"));
+    }
+
+    #[test]
+    fn prompt_emphasizes_reading_before_writing() {
+        let prompt = build_system_prompt(Path::new("/test"), None);
+        assert!(prompt.contains("Before making changes, build understanding"));
     }
 
     #[test]
