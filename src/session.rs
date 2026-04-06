@@ -57,7 +57,6 @@ pub enum TranscriptEntry {
 }
 
 impl TranscriptEntry {
-    #[allow(dead_code)] // Used in Phase 5 (compaction)
     pub fn token_estimate(&self) -> usize {
         match self {
             Self::UserMessage { token_estimate, .. }
@@ -210,7 +209,6 @@ impl Transcript {
 
     /// Atomically rewrite the transcript with a new set of entries.
     /// Writes to a temp file first, then renames over the original.
-    #[allow(dead_code)] // Used in Phase 5 (compaction) and Phase 7 (rewind)
     pub fn atomic_rewrite(&self, entries: &[TranscriptEntry]) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)

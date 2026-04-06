@@ -52,7 +52,6 @@ impl ModelProfile {
 
     /// Compaction threshold: 60% of the effective ceiling.
     /// When estimated tokens exceed this, heuristic compaction fires.
-    #[allow(dead_code)] // Used in Phase 5 (compaction triggers in main.rs)
     pub fn compaction_threshold(&self) -> usize {
         self.effective_ceiling * 60 / 100
     }

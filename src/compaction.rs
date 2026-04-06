@@ -44,31 +44,28 @@ pub fn heuristic_compact(entries: &[TranscriptEntry]) -> CompactionResult {
 
     while i < old_entries.len() {
         match &old_entries[i] {
-            TranscriptEntry::ToolCall { call_id, name, arguments, .. } => {
-                // Check if this is a file_read that has a later duplicate
-                if name == "file_read" {
-                    if let Some(path) = extract_path(arguments) {
-                        if let Some(&last_idx) = last_read_index.get(&path) {
-                            if last_idx > i {
-                                // This read has a later duplicate — skip both ToolCall and ToolResult
-                                // Find and skip the matching ToolResult
-                                let cid = call_id.clone();
-                                i += 1;
-                                while i < old_entries.len() {
-                                    if matches!(&old_entries[i], TranscriptEntry::ToolResult { call_id, .. } if call_id == &cid) {
-                                        i += 1; // skip the result too
-                                        break;
-                                    }
-                                    // Keep non-matching entries
-                                    result.push(old_entries[i].clone());
-                                    i += 1;
-                                }
-                                compacted = true;
-                                continue;
-                            }
-                        }
+            TranscriptEntry::ToolCall { call_id, name, arguments, .. }
+                if name == "file_read"
+                    && extract_path(arguments)
+                        .and_then(|path| last_read_index.get(&path).copied())
+                        .is_some_and(|last_idx| last_idx > i) =>
+            {
+                // This file_read has a later duplicate — skip both ToolCall and ToolResult
+                let cid = call_id.clone();
+                i += 1;
+                while i < old_entries.len() {
+                    if matches!(&old_entries[i], TranscriptEntry::ToolResult { call_id, .. } if call_id == &cid) {
+                        i += 1; // skip the result too
+                        break;
                     }
+                    // Keep non-matching entries
+                    result.push(old_entries[i].clone());
+                    i += 1;
                 }
+                compacted = true;
+                continue;
+            }
+            TranscriptEntry::ToolCall { .. } => {
                 // Keep the tool call as-is
                 result.push(old_entries[i].clone());
                 i += 1;
@@ -120,12 +117,11 @@ fn find_last_file_read_indices(entries: &[TranscriptEntry]) -> HashMap<String, u
     let mut last_read: HashMap<String, usize> = HashMap::new();
 
     for (i, entry) in entries.iter().enumerate() {
-        if let TranscriptEntry::ToolCall { name, arguments, .. } = entry {
-            if name == "file_read" {
-                if let Some(path) = extract_path(arguments) {
-                    last_read.insert(path, i);
-                }
-            }
+        if let TranscriptEntry::ToolCall { name, arguments, .. } = entry
+            && name == "file_read"
+            && let Some(path) = extract_path(arguments)
+        {
+            last_read.insert(path, i);
         }
     }
 
@@ -142,10 +138,10 @@ fn extract_path(arguments: &str) -> Option<String> {
 /// Find the arguments string for a ToolCall with the given call_id.
 fn find_args_for_call_id(entries: &[TranscriptEntry], target_call_id: &str) -> String {
     for entry in entries {
-        if let TranscriptEntry::ToolCall { call_id, arguments, .. } = entry {
-            if call_id == target_call_id {
-                return arguments.clone();
-            }
+        if let TranscriptEntry::ToolCall { call_id, arguments, .. } = entry
+            && call_id == target_call_id
+        {
+            return arguments.clone();
         }
     }
     String::new()

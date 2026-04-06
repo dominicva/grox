@@ -102,7 +102,6 @@ impl ContextAssembler {
     /// Estimate the total token count for a potential API request.
     ///
     /// Sums system-layer overhead + per-entry token estimates.
-    #[allow(dead_code)] // Used in Phase 5 (compaction triggers)
     pub fn estimate_tokens(&self, entries: &[TranscriptEntry]) -> usize {
         let transcript_tokens: usize = entries.iter().map(|e| e.token_estimate()).sum();
         self.system_overhead_estimate + transcript_tokens

@@ -188,10 +188,17 @@ async fn main() -> Result<()> {
         }
 
         if input == "/status" {
+            let profile = model_profile::ModelProfile::for_model(client.model());
+            let estimated = assembler.estimate_tokens(&history);
             println!("  model:   {}", client.model().cyan());
             println!("  project: {}", project_root.display().to_string().cyan());
             println!("  mode:    {}", format!("{permission_mode}").cyan());
             println!("  session: {}", &session_meta.session_id[..8].dimmed());
+            println!(
+                "  context: ~{} tokens (threshold: {})",
+                estimated.to_string().cyan(),
+                profile.compaction_threshold().to_string().cyan()
+            );
             println!(
                 "  tools:   {}",
                 tools::Tool::all()
@@ -204,12 +211,56 @@ async fn main() -> Result<()> {
             continue;
         }
 
+        if input == "/compact" {
+            let result = compaction::heuristic_compact(&history);
+            if result.compacted {
+                let old_tokens: usize = history.iter().map(|e| e.token_estimate()).sum();
+                let new_tokens: usize = result.entries.iter().map(|e| e.token_estimate()).sum();
+                let old_count = history.len();
+                let new_count = result.entries.len();
+                history = result.entries;
+                transcript.atomic_rewrite(&history)?;
+                println!(
+                    "{}",
+                    format!(
+                        "  compacted: {} entries → {} entries, ~{} → ~{} tokens",
+                        old_count, new_count, old_tokens, new_tokens
+                    )
+                    .yellow()
+                );
+            } else {
+                println!("{}", "  nothing to compact (fewer than 5 turns)".dimmed());
+            }
+            continue;
+        }
+
         rl.add_history_entry(&input)?;
 
         // Append user message to history and transcript
         let user_entry = TranscriptEntry::user_message(&input);
         history.push(user_entry.clone());
         transcript.append(&user_entry)?;
+
+        // Preflight budget check: compact if estimated tokens exceed threshold
+        let profile = model_profile::ModelProfile::for_model(client.model());
+        let estimated = assembler.estimate_tokens(&history);
+        if estimated > profile.compaction_threshold() {
+            let result = compaction::heuristic_compact(&history);
+            if result.compacted {
+                let old_tokens: usize = history.iter().map(|e| e.token_estimate()).sum();
+                let new_tokens: usize = result.entries.iter().map(|e| e.token_estimate()).sum();
+                history = result.entries;
+                transcript.atomic_rewrite(&history)?;
+                eprintln!(
+                    "{}",
+                    format!(
+                        "  auto-compacted: ~{old_tokens} → ~{new_tokens} tokens (threshold: {})",
+                        profile.compaction_threshold()
+                    )
+                    .yellow()
+                );
+            }
+        }
 
         // Build full message array from history
         let api_input = assembler.build_messages(&history);
