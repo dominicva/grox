@@ -4,6 +4,7 @@ mod model_profile;
 mod permissions;
 mod prompt;
 mod repo_context;
+#[allow(dead_code)] // Wired into runtime in Phase 4
 mod session;
 mod tools;
 mod util;
@@ -112,14 +113,14 @@ async fn main() -> Result<()> {
 
     // Load GROX.md custom instructions if present
     let grox_md = util::load_grox_md(&project_root);
-    if let Some(ref content) = grox_md {
-        if content.contains("truncated") {
-            eprintln!(
-                "{}",
-                "  warning: GROX.md exceeds 10K characters and was truncated"
-                    .yellow()
-            );
-        }
+    if let Some(ref content) = grox_md
+        && content.contains("truncated")
+    {
+        eprintln!(
+            "{}",
+            "  warning: GROX.md exceeds 10K characters and was truncated"
+                .yellow()
+        );
     }
 
     let repo_ctx_text = if repo_ctx.text.is_empty() { None } else { Some(repo_ctx.text.as_str()) };

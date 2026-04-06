@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 
 // Clipping thresholds
+#[allow(dead_code)]
 const DISPLAY_MAX_CHARS: usize = 1_000;
 const MODEL_MAX_CHARS: usize = 30_000;
 
@@ -75,6 +76,7 @@ pub fn validate_path(target: &Path, root: &Path) -> Result<PathBuf> {
 }
 
 /// Clip output for terminal display (shorter threshold).
+#[allow(dead_code)]
 pub fn clip_for_display(output: &str) -> String {
     clip(output, DISPLAY_MAX_CHARS)
 }

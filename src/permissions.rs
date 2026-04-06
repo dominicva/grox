@@ -57,10 +57,12 @@ impl SessionPermissions {
         }
     }
 
+    #[allow(dead_code)]
     pub fn mode(&self) -> PermissionMode {
         self.mode
     }
 
+    #[allow(dead_code)]
     pub fn project_root(&self) -> &Path {
         &self.project_root
     }
@@ -122,10 +124,10 @@ impl SessionPermissions {
 
         // 5. Check "always" grants for the target directory
         let target_dir = self.target_dir(arguments);
-        if let Some(dir) = &target_dir {
-            if self.always_granted_dirs.contains(dir) {
-                return PermissionCheck::Allow;
-            }
+        if let Some(dir) = &target_dir
+            && self.always_granted_dirs.contains(dir)
+        {
+            return PermissionCheck::Allow;
         }
 
         // 6. Trust mode: auto-approve writes inside project
@@ -159,6 +161,7 @@ impl SessionPermissions {
 
     /// Prompt the user interactively and return whether the action is allowed.
     /// If the user chooses "always", records the grant for the target directory.
+    #[allow(dead_code)]
     pub fn prompt_user(&mut self, check: &PermissionCheck) -> bool {
         let (message, allow_always) = match check {
             PermissionCheck::Prompt { message, allow_always } => (message.as_str(), *allow_always),
@@ -220,6 +223,7 @@ impl SessionPermissions {
     }
 
     /// Record an "always" grant for a directory.
+    #[allow(dead_code)]
     pub fn grant_always(&mut self, dir: PathBuf) {
         self.always_granted_dirs.insert(dir);
     }
@@ -279,10 +283,10 @@ fn is_destructive_command(cmd: &str) -> bool {
     ];
 
     for pattern in &patterns {
-        if let Ok(re) = Regex::new(pattern) {
-            if re.is_match(cmd) {
-                return true;
-            }
+        if let Ok(re) = Regex::new(pattern)
+            && re.is_match(cmd)
+        {
+            return true;
         }
     }
     false

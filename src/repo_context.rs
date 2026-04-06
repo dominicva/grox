@@ -13,9 +13,9 @@ pub struct RepoContext {
 impl RepoContext {
     /// Gather repo context from the given path. Gracefully handles non-git repos.
     pub fn gather(root: &Path) -> RepoContext {
-        let mut sections = Vec::new();
+        // Collect sections: git info (optional) + directory tree (always)
+        let mut sections: Vec<String> = Vec::with_capacity(4);
 
-        // Git info (all optional — may not be a git repo)
         if let Some(branch) = git_branch(root) {
             sections.push(format!("Branch: {branch}"));
         }
@@ -28,27 +28,29 @@ impl RepoContext {
             }
         }
 
-        if let Some(log) = git_log(root) {
-            if !log.is_empty() {
-                sections.push(format!("Recent commits:\n{log}"));
-            }
+        if let Some(log) = git_log(root)
+            && !log.is_empty()
+        {
+            sections.push(format!("Recent commits:\n{log}"));
         }
 
-        // Directory tree (always available)
         let tree = dir_tree(root, 2);
         if !tree.is_empty() {
             sections.push(format!("Directory tree:\n{tree}"));
         }
 
         let mut text = sections.join("\n\n");
+        let truncation_note = "\n\n... (repo context truncated at 10K characters)";
         let truncated = text.len() > MAX_CHARS;
         if truncated {
-            text.truncate(MAX_CHARS);
+            // Reserve space for the truncation note so final size stays within MAX_CHARS
+            let budget = MAX_CHARS - truncation_note.len();
+            text.truncate(budget);
             // Find last newline to avoid cutting mid-line
             if let Some(pos) = text.rfind('\n') {
                 text.truncate(pos);
             }
-            text.push_str("\n\n... (repo context truncated at 10K characters)");
+            text.push_str(truncation_note);
         }
 
         RepoContext { text, truncated }
@@ -100,7 +102,7 @@ fn dir_tree(root: &Path, max_depth: usize) -> String {
 }
 
 fn collect_tree(
-    base: &Path,
+    _base: &Path,
     current: &Path,
     depth: usize,
     max_depth: usize,
@@ -133,7 +135,7 @@ fn collect_tree(
 
         if is_dir {
             lines.push(format!("{indent}{name}/"));
-            collect_tree(base, &entry.path(), depth + 1, max_depth, lines);
+            collect_tree(_base, &entry.path(), depth + 1, max_depth, lines);
         } else {
             lines.push(format!("{indent}{name}"));
         }
@@ -223,7 +225,7 @@ mod tests {
         let ctx = RepoContext::gather(dir.path());
         assert!(ctx.truncated);
         assert!(ctx.text.contains("truncated"));
-        assert!(ctx.text.len() <= MAX_CHARS + 100); // some slack for the truncation message
+        assert!(ctx.text.len() <= MAX_CHARS, "truncated text ({} bytes) should not exceed MAX_CHARS ({})", ctx.text.len(), MAX_CHARS);
     }
 
     #[test]

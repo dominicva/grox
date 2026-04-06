@@ -7,13 +7,13 @@ pub fn build_system_prompt(
     repo_context: Option<&str>,
     grox_md: Option<&str>,
 ) -> String {
-    let mut sections = Vec::new();
-
-    sections.push(identity_section(project_root));
-    sections.push(output_style_section());
-    sections.push(working_with_code_section());
-    sections.push(taking_action_section());
-    sections.push(tools_section());
+    let mut sections = vec![
+        identity_section(project_root),
+        output_style_section(),
+        working_with_code_section(),
+        taking_action_section(),
+        tools_section(),
+    ];
 
     if let Some(ctx) = repo_context {
         sections.push(repo_context_section(ctx));

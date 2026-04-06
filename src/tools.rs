@@ -7,6 +7,32 @@ use tokio::time::{Duration, timeout};
 
 use crate::util;
 
+/// Resolve a tool path argument against the project root.
+/// Relative paths are joined to project_root; absolute paths are used as-is.
+fn resolve_tool_path(path: &str, project_root: &Path) -> PathBuf {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        project_root.join(p)
+    }
+}
+
+/// Count occurrences of `needle` in `haystack`, including overlapping matches.
+/// For example, "aa" in "aaa" returns 2 (positions 0 and 1).
+fn count_occurrences(haystack: &str, needle: &str) -> usize {
+    if needle.is_empty() {
+        return 0;
+    }
+    let mut count = 0;
+    let mut start = 0;
+    while let Some(pos) = haystack[start..].find(needle) {
+        count += 1;
+        start += pos + 1; // advance by 1 byte to detect overlaps
+    }
+    count
+}
+
 #[derive(Debug, Clone)]
 pub enum Tool {
     FileRead,
@@ -184,24 +210,26 @@ impl Tool {
 
     pub async fn execute(&self, arguments: &str, project_root: &std::path::Path) -> Result<String> {
         match self {
-            Tool::FileRead => execute_file_read(arguments),
+            Tool::FileRead => execute_file_read(arguments, project_root),
             Tool::FileWrite => execute_file_write(arguments, project_root),
             Tool::FileEdit => execute_file_edit(arguments, project_root),
-            Tool::ListFiles => execute_list_files(arguments),
+            Tool::ListFiles => execute_list_files(arguments, project_root),
             Tool::ShellExec => execute_shell_exec(arguments, project_root).await,
             Tool::Grep => execute_grep(arguments, project_root).await,
         }
     }
 }
 
-fn execute_file_read(arguments: &str) -> Result<String> {
+fn execute_file_read(arguments: &str, project_root: &std::path::Path) -> Result<String> {
     let args: Value = serde_json::from_str(arguments)?;
     let path = args["path"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required parameter: path"))?;
 
+    let resolved = resolve_tool_path(path, project_root);
+
     // Read as bytes first for binary detection
-    let bytes = std::fs::read(path)
+    let bytes = std::fs::read(&resolved)
         .map_err(|e| anyhow::anyhow!("Failed to read file '{}': {}", path, e))?;
 
     if util::is_binary(&bytes) {
@@ -223,38 +251,38 @@ fn execute_file_write(arguments: &str, project_root: &std::path::Path) -> Result
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required parameter: content"))?;
 
-    let target = std::path::Path::new(path);
+    let target = resolve_tool_path(path, project_root);
 
     // For nested paths, create parent directories first so validate_path can resolve them.
     // We create within the project root to ensure safety before canonicalization.
-    if let Some(parent) = target.parent() {
-        if !parent.exists() {
-            // Ensure the parent chain stays within project root by checking the
-            // closest existing ancestor resolves inside the root
-            let mut ancestor = parent.to_path_buf();
-            while !ancestor.exists() {
-                if !ancestor.pop() {
-                    break;
-                }
+    if let Some(parent) = target.parent()
+        && !parent.exists()
+    {
+        // Ensure the parent chain stays within project root by checking the
+        // closest existing ancestor resolves inside the root
+        let mut ancestor = parent.to_path_buf();
+        while !ancestor.exists() {
+            if !ancestor.pop() {
+                break;
             }
-            if ancestor.exists() {
-                let canonical_ancestor = ancestor.canonicalize()?;
-                let canonical_root = project_root.canonicalize()?;
-                if !canonical_ancestor.starts_with(&canonical_root) {
-                    anyhow::bail!(
-                        "Path '{}' is outside the project root '{}'",
-                        target.display(),
-                        project_root.display()
-                    );
-                }
-            }
-            std::fs::create_dir_all(parent)
-                .map_err(|e| anyhow::anyhow!("Failed to create directory '{}': {}", parent.display(), e))?;
         }
+        if ancestor.exists() {
+            let canonical_ancestor = ancestor.canonicalize()?;
+            let canonical_root = project_root.canonicalize()?;
+            if !canonical_ancestor.starts_with(&canonical_root) {
+                anyhow::bail!(
+                    "Path '{}' is outside the project root '{}'",
+                    target.display(),
+                    project_root.display()
+                );
+            }
+        }
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow::anyhow!("Failed to create directory '{}': {}", parent.display(), e))?;
     }
 
     // Validate the final path is within project root (symlink-safe)
-    let resolved = util::validate_path(target, project_root)?;
+    let resolved = util::validate_path(&target, project_root)?;
 
     std::fs::write(&resolved, content)
         .map_err(|e| anyhow::anyhow!("Failed to write file '{}': {}", path, e))?;
@@ -282,8 +310,8 @@ fn execute_file_edit(arguments: &str, project_root: &std::path::Path) -> Result<
         bail!("old_string and new_string are identical — nothing to change");
     }
 
-    let target = std::path::Path::new(path);
-    let resolved = util::validate_path(target, project_root)?;
+    let target = resolve_tool_path(path, project_root);
+    let resolved = util::validate_path(&target, project_root)?;
 
     // Read as bytes first for binary detection
     let bytes = std::fs::read(&resolved)
@@ -296,7 +324,10 @@ fn execute_file_edit(arguments: &str, project_root: &std::path::Path) -> Result<
     let content = String::from_utf8(bytes)
         .map_err(|_| anyhow::anyhow!("File '{}' contains invalid UTF-8", path))?;
 
-    let count = content.matches(old_string).count();
+    // Count occurrences with overlapping detection.
+    // str::matches is non-overlapping, so we scan manually to catch cases
+    // like old_string="aa" in "aaa" (positions 0 and 1).
+    let count = count_occurrences(&content, old_string);
 
     if count == 0 {
         bail!("old_string not found in '{}'", path);
@@ -425,7 +456,7 @@ async fn execute_grep(arguments: &str, project_root: &Path) -> Result<String> {
 
     let search_path = args["path"]
         .as_str()
-        .map(PathBuf::from)
+        .map(|p| resolve_tool_path(p, project_root))
         .unwrap_or_else(|| project_root.to_path_buf());
 
     let max_results = args["max_results"]
@@ -496,14 +527,16 @@ async fn execute_grep(arguments: &str, project_root: &Path) -> Result<String> {
     }
 }
 
-fn execute_list_files(arguments: &str) -> Result<String> {
+fn execute_list_files(arguments: &str, project_root: &std::path::Path) -> Result<String> {
     let args: Value = serde_json::from_str(arguments)?;
     let path = args["path"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required parameter: path"))?;
 
+    let resolved = resolve_tool_path(path, project_root);
+
     let mut entries: Vec<String> = Vec::new();
-    let read_dir = std::fs::read_dir(path)
+    let read_dir = std::fs::read_dir(&resolved)
         .map_err(|e| anyhow::anyhow!("Failed to list directory '{}': {}", path, e))?;
 
     for entry in read_dir {
@@ -786,7 +819,7 @@ mod tests {
     async fn file_edit_binary_file() {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("binary.bin");
-        std::fs::write(&file_path, &[0x89, 0x50, 0x4E, 0x47, 0x00, 0x00]).unwrap();
+        std::fs::write(&file_path, [0x89, 0x50, 0x4E, 0x47, 0x00, 0x00]).unwrap();
 
         let args = json!({
             "path": file_path.to_str().unwrap(),
@@ -837,6 +870,86 @@ mod tests {
         let result = Tool::FileEdit.execute(&args, dir.path()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("outside the project root"));
+    }
+
+    #[tokio::test]
+    async fn file_edit_overlapping_matches_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("overlap.txt");
+        std::fs::write(&file_path, "aaa").unwrap();
+
+        let args = json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "aa",
+            "new_string": "bb"
+        }).to_string();
+
+        let result = Tool::FileEdit.execute(&args, dir.path()).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("2 locations"), "expected 2 overlapping matches, got: {err}");
+        // File should be unchanged
+        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "aaa");
+    }
+
+    #[tokio::test]
+    async fn file_read_relative_path_resolves_to_project_root() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn hello() {}").unwrap();
+
+        let args = json!({"path": "src/lib.rs"}).to_string();
+        let result = Tool::FileRead.execute(&args, dir.path()).await.unwrap();
+        assert!(result.contains("pub fn hello()"));
+    }
+
+    #[tokio::test]
+    async fn file_edit_relative_path_resolves_to_project_root() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "old content").unwrap();
+
+        let args = json!({
+            "path": "src/lib.rs",
+            "old_string": "old content",
+            "new_string": "new content"
+        }).to_string();
+
+        let result = Tool::FileEdit.execute(&args, dir.path()).await.unwrap();
+        assert!(result.contains("Edited"));
+        assert_eq!(std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap(), "new content");
+    }
+
+    #[tokio::test]
+    async fn list_files_relative_path_resolves_to_project_root() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
+
+        let args = json!({"path": "src"}).to_string();
+        let result = Tool::ListFiles.execute(&args, dir.path()).await.unwrap();
+        assert!(result.contains("main.rs"));
+    }
+
+    #[test]
+    fn count_occurrences_non_overlapping() {
+        assert_eq!(count_occurrences("hello hello hello", "hello"), 3);
+    }
+
+    #[test]
+    fn count_occurrences_overlapping() {
+        assert_eq!(count_occurrences("aaa", "aa"), 2);
+        assert_eq!(count_occurrences("aaaa", "aa"), 3);
+    }
+
+    #[test]
+    fn count_occurrences_none() {
+        assert_eq!(count_occurrences("hello", "xyz"), 0);
+    }
+
+    #[test]
+    fn count_occurrences_empty_needle() {
+        assert_eq!(count_occurrences("hello", ""), 0);
     }
 
     // --- list_files tests ---

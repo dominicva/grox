@@ -142,6 +142,8 @@ impl Transcript {
             .context("Failed to serialize transcript entry")?;
         writeln!(file, "{line}")
             .with_context(|| format!("Failed to write to transcript: {}", self.path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("Failed to sync transcript: {}", self.path.display()))?;
         Ok(())
     }
 
@@ -194,7 +196,7 @@ impl Transcript {
                     .context("Failed to serialize transcript entry")?;
                 writeln!(file, "{line}")?;
             }
-            file.flush()?;
+            file.sync_all()?;
         }
 
         std::fs::rename(&tmp_path, &self.path)
@@ -258,8 +260,17 @@ impl SessionMeta {
         let json = serde_json::to_string_pretty(self)
             .context("Failed to serialize session metadata")?;
 
-        std::fs::write(&tmp_path, &json)
-            .with_context(|| format!("Failed to write temp file: {}", tmp_path.display()))?;
+        {
+            let file = std::fs::File::create(&tmp_path)
+                .with_context(|| format!("Failed to create temp file: {}", tmp_path.display()))?;
+            let mut writer = std::io::BufWriter::new(file);
+            writer.write_all(json.as_bytes())
+                .with_context(|| format!("Failed to write temp file: {}", tmp_path.display()))?;
+            writer.into_inner()
+                .map_err(|e| anyhow::anyhow!("Failed to flush temp file: {}", e))?
+                .sync_all()
+                .with_context(|| format!("Failed to sync temp file: {}", tmp_path.display()))?;
+        }
 
         std::fs::rename(&tmp_path, &path)
             .with_context(|| format!("Failed to rename temp file to: {}", path.display()))?;

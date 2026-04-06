@@ -118,8 +118,7 @@ impl GrokApi for GrokClient {
                 match status.as_u16() {
                     401 => bail!("Invalid API key. Set XAI_API_KEY in your environment."),
                     429 => {
-                        if attempt < RETRY_DELAYS.len() {
-                            let delay = RETRY_DELAYS[attempt];
+                        if let Some(&delay) = RETRY_DELAYS.get(attempt) {
                             eprintln!("  Rate limited (429). Retrying in {delay}s...");
                             tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
                             continue;
