@@ -4,6 +4,7 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use crate::api::GrokApi;
+use crate::checkpoint::{self, FileSnapshot};
 use crate::session::TranscriptEntry;
 use crate::tools::Tool;
 
@@ -13,18 +14,25 @@ const MAX_TURNS: usize = 25;
 /// After these execute, repo context should be refreshed.
 const MUTATING_TOOLS: &[&str] = &["file_write", "file_edit", "shell_exec"];
 
+/// Tools that modify files and should be checkpointed.
+/// shell_exec is NOT checkpointed (only tracked for warning).
+const CHECKPOINTED_TOOLS: &[&str] = &["file_write", "file_edit"];
+
 pub struct Agent<'a> {
     api: &'a dyn GrokApi,
     tool_defs: Vec<Value>,
     project_root: PathBuf,
+    checkpoint_enabled: bool,
 }
 
 impl<'a> Agent<'a> {
     pub fn new(api: &'a dyn GrokApi, project_root: &Path) -> Self {
+        let checkpoint_enabled = checkpoint::is_git_repo(project_root);
         Self {
             api,
             tool_defs: Tool::definitions(),
             project_root: project_root.to_path_buf(),
+            checkpoint_enabled,
         }
     }
 
@@ -99,6 +107,8 @@ impl<'a> Agent<'a> {
 
             // Execute tool calls and accumulate into messages
             let mut had_mutation = false;
+            let mut snapshots: Vec<FileSnapshot> = Vec::new();
+            let mut had_shell_exec = false;
 
             for tc in &response.tool_calls {
                 on_tool_call(&tc.name, &tc.arguments);
@@ -113,6 +123,19 @@ impl<'a> Agent<'a> {
                 }));
                 entries.push(tc_entry);
 
+                // Snapshot file before modification (checkpoint)
+                let pre_hash = if self.checkpoint_enabled
+                    && CHECKPOINTED_TOOLS.contains(&tc.name.as_str())
+                {
+                    checkpoint::extract_tool_path(&tc.arguments).and_then(|path| {
+                        let abs_path =
+                            checkpoint::resolve_checkpoint_path(&path, &self.project_root);
+                        checkpoint::snapshot_pre(&abs_path, &self.project_root).ok()
+                    })
+                } else {
+                    None
+                };
+
                 // Check permission before executing
                 let authorized = on_authorize(&tc.name, &tc.arguments);
                 let output = if !authorized {
@@ -120,6 +143,9 @@ impl<'a> Agent<'a> {
                 } else {
                     if MUTATING_TOOLS.contains(&tc.name.as_str()) {
                         had_mutation = true;
+                    }
+                    if tc.name == "shell_exec" {
+                        had_shell_exec = true;
                     }
                     match Tool::from_name(&tc.name) {
                         Some(tool) => match tool.execute(&tc.arguments, &self.project_root).await {
@@ -129,6 +155,25 @@ impl<'a> Agent<'a> {
                         None => format!("Unknown tool: {}", tc.name),
                     }
                 };
+
+                // Snapshot file after modification (checkpoint)
+                if let Some(pre) = pre_hash {
+                    if authorized {
+                        if let Some(path) = checkpoint::extract_tool_path(&tc.arguments) {
+                            let abs_path =
+                                checkpoint::resolve_checkpoint_path(&path, &self.project_root);
+                            if let Ok(post) =
+                                checkpoint::snapshot_post(&abs_path, &self.project_root)
+                            {
+                                snapshots.push(FileSnapshot {
+                                    path: abs_path.display().to_string(),
+                                    pre_hash: pre,
+                                    post_hash: post,
+                                });
+                            }
+                        }
+                    }
+                }
 
                 on_tool_result(&tc.name, &output);
 
@@ -140,6 +185,11 @@ impl<'a> Agent<'a> {
                     "output": output,
                 }));
                 entries.push(tr_entry);
+            }
+
+            // Record checkpoint if any files were modified
+            if !snapshots.is_empty() {
+                entries.push(TranscriptEntry::checkpoint(snapshots, had_shell_exec));
             }
 
             // Refresh system prompt after mutating tools so the next iteration
@@ -602,6 +652,243 @@ mod tests {
             .unwrap();
 
         assert_eq!(refresh_count, 0, "should not refresh when tool was denied");
+    }
+
+    // --- Checkpoint tests ---
+
+    fn setup_git_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn checkpoint_emitted_for_file_write() {
+        let repo = setup_git_repo();
+        let file_path = repo.path().join("test.txt");
+
+        let mock = MockGrokApi::new(vec![
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_1".into(),
+                    name: "file_write".into(),
+                    arguments: format!(r#"{{"path": "{}", "content": "hello"}}"#, file_path.display()),
+                }],
+                usage: None,
+            },
+            TurnResponse {
+                text: "Done.".into(),
+                tool_calls: vec![],
+                usage: None,
+            },
+        ]);
+
+        let agent = Agent::new(&mock, repo.path());
+        let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "write"})];
+
+        let result = agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+            .await
+            .unwrap();
+
+        // Should have: ToolCall, ToolResult, Checkpoint, AssistantMessage
+        let checkpoint_entries: Vec<_> = result.entries.iter()
+            .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
+            .collect();
+        assert_eq!(checkpoint_entries.len(), 1);
+
+        if let TranscriptEntry::Checkpoint { snapshots, has_shell_exec, .. } = &checkpoint_entries[0] {
+            assert_eq!(snapshots.len(), 1);
+            assert_eq!(snapshots[0].pre_hash, checkpoint::CREATED_SENTINEL);
+            assert!(!snapshots[0].post_hash.is_empty());
+            assert!(!has_shell_exec);
+        } else {
+            panic!("Expected Checkpoint");
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_emitted_for_file_edit() {
+        let repo = setup_git_repo();
+        let file_path = repo.path().join("test.txt");
+        std::fs::write(&file_path, "old content here").unwrap();
+
+        let mock = MockGrokApi::new(vec![
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_1".into(),
+                    name: "file_edit".into(),
+                    arguments: format!(
+                        r#"{{"path": "{}", "old_string": "old content", "new_string": "new content"}}"#,
+                        file_path.display()
+                    ),
+                }],
+                usage: None,
+            },
+            TurnResponse {
+                text: "Edited.".into(),
+                tool_calls: vec![],
+                usage: None,
+            },
+        ]);
+
+        let agent = Agent::new(&mock, repo.path());
+        let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "edit"})];
+
+        let result = agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+            .await
+            .unwrap();
+
+        let checkpoint_entries: Vec<_> = result.entries.iter()
+            .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
+            .collect();
+        assert_eq!(checkpoint_entries.len(), 1);
+
+        if let TranscriptEntry::Checkpoint { snapshots, .. } = &checkpoint_entries[0] {
+            assert_eq!(snapshots.len(), 1);
+            assert_ne!(snapshots[0].pre_hash, checkpoint::CREATED_SENTINEL);
+            assert_ne!(snapshots[0].pre_hash, snapshots[0].post_hash);
+        } else {
+            panic!("Expected Checkpoint");
+        }
+    }
+
+    #[tokio::test]
+    async fn no_checkpoint_for_read_only_tools() {
+        let repo = setup_git_repo();
+        let file_path = repo.path().join("test.txt");
+        std::fs::write(&file_path, "content").unwrap();
+
+        let mock = MockGrokApi::new(vec![
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_1".into(),
+                    name: "file_read".into(),
+                    arguments: format!(r#"{{"path": "{}"}}"#, file_path.display()),
+                }],
+                usage: None,
+            },
+            TurnResponse {
+                text: "Read.".into(),
+                tool_calls: vec![],
+                usage: None,
+            },
+        ]);
+
+        let agent = Agent::new(&mock, repo.path());
+        let input = vec![json!({"role": "user", "content": "read"})];
+
+        let result = agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+            .await
+            .unwrap();
+
+        let checkpoint_entries: Vec<_> = result.entries.iter()
+            .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
+            .collect();
+        assert_eq!(checkpoint_entries.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn no_checkpoint_when_permission_denied() {
+        let repo = setup_git_repo();
+        let file_path = repo.path().join("test.txt");
+
+        let mock = MockGrokApi::new(vec![
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_1".into(),
+                    name: "file_write".into(),
+                    arguments: format!(r#"{{"path": "{}", "content": "x"}}"#, file_path.display()),
+                }],
+                usage: None,
+            },
+            TurnResponse {
+                text: "Denied.".into(),
+                tool_calls: vec![],
+                usage: None,
+            },
+        ]);
+
+        let agent = Agent::new(&mock, repo.path());
+        let input = vec![json!({"role": "user", "content": "write"})];
+        let mut deny_all = |_: &str, _: &str| -> bool { false };
+
+        let result = agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut deny_all, &mut no_refresh)
+            .await
+            .unwrap();
+
+        let checkpoint_entries: Vec<_> = result.entries.iter()
+            .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
+            .collect();
+        assert_eq!(checkpoint_entries.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_tracks_shell_exec_flag() {
+        let repo = setup_git_repo();
+        let file_path = repo.path().join("test.txt");
+
+        let mock = MockGrokApi::new(vec![
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![
+                    ToolCall {
+                        call_id: "call_1".into(),
+                        name: "file_write".into(),
+                        arguments: format!(r#"{{"path": "{}", "content": "hello"}}"#, file_path.display()),
+                    },
+                    ToolCall {
+                        call_id: "call_2".into(),
+                        name: "shell_exec".into(),
+                        arguments: r#"{"command": "echo hi"}"#.into(),
+                    },
+                ],
+                usage: None,
+            },
+            TurnResponse {
+                text: "Done.".into(),
+                tool_calls: vec![],
+                usage: None,
+            },
+        ]);
+
+        let agent = Agent::new(&mock, repo.path());
+        let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "do it"})];
+
+        let result = agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+            .await
+            .unwrap();
+
+        let checkpoint_entries: Vec<_> = result.entries.iter()
+            .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
+            .collect();
+        assert_eq!(checkpoint_entries.len(), 1);
+
+        if let TranscriptEntry::Checkpoint { has_shell_exec, .. } = &checkpoint_entries[0] {
+            assert!(has_shell_exec, "should flag shell_exec in mixed turn");
+        }
     }
 
     // --- History accumulation verification ---
