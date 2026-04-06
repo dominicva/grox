@@ -12,7 +12,6 @@ pub struct TurnResponse {
     pub text: String,
     pub tool_calls: Vec<ToolCall>,
     pub usage: Option<Usage>,
-    pub response_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -134,7 +133,6 @@ impl GrokApi for GrokClient {
             let mut text = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut usage: Option<Usage> = None;
-            let mut response_id: Option<String> = None;
 
             while let Some(event) = stream.try_next().await? {
                 if event.data == "[DONE]" {
@@ -202,13 +200,9 @@ impl GrokApi for GrokClient {
                             }
                         }
                     }
-                    // Response completed — extract usage and response_id
+                    // Response completed — extract usage
                     "response.completed" => {
                         if let Some(resp) = parsed.get("response") {
-                            response_id = resp.get("id")
-                                .and_then(|v| v.as_str())
-                                .map(String::from);
-
                             if let Some(u) = resp.get("usage") {
                                 let input_tokens = u.get("input_tokens")
                                     .and_then(|v| v.as_u64())
@@ -228,7 +222,6 @@ impl GrokApi for GrokClient {
                 text,
                 tool_calls,
                 usage,
-                response_id,
             });
         }
 

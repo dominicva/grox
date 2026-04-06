@@ -130,6 +130,7 @@ impl Transcript {
         Self { path: path.into() }
     }
 
+    #[allow(dead_code)] // Used in Phase 8 (session resume)
     pub fn path(&self) -> &Path {
         &self.path
     }

@@ -161,13 +161,11 @@ mod tests {
                     arguments: format!(r#"{{"path": "{}"}}"#, path),
                 }],
                 usage: None,
-                response_id: Some("resp_1".into()),
             },
             TurnResponse {
                 text: "The file contains a main function.".into(),
                 tool_calls: vec![],
                 usage: None,
-                response_id: Some("resp_2".into()),
             },
         ]);
 
@@ -193,13 +191,11 @@ mod tests {
                     arguments: r#"{"path": "/nonexistent/file.rs"}"#.into(),
                 }],
                 usage: None,
-                response_id: Some("resp_1".into()),
             },
             TurnResponse {
                 text: "That file doesn't exist.".into(),
                 tool_calls: vec![],
                 usage: None,
-                response_id: Some("resp_2".into()),
             },
         ]);
 
@@ -220,7 +216,6 @@ mod tests {
             text: "Hello! How can I help?".into(),
             tool_calls: vec![],
             usage: None,
-            response_id: Some("resp_1".into()),
         }]);
 
         let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
@@ -245,7 +240,6 @@ mod tests {
                     arguments: r#"{"path": "/dev/null"}"#.into(),
                 }],
                 usage: None,
-                response_id: Some(format!("resp_{i}")),
             })
             .collect();
 
@@ -272,13 +266,11 @@ mod tests {
                     arguments: "{}".into(),
                 }],
                 usage: None,
-                response_id: Some("resp_1".into()),
             },
             TurnResponse {
                 text: "I don't have that tool.".into(),
                 tool_calls: vec![],
                 usage: None,
-                response_id: Some("resp_2".into()),
             },
         ]);
 
@@ -304,13 +296,11 @@ mod tests {
                     arguments: r#"{"path": "/tmp/test.txt", "content": "hello"}"#.into(),
                 }],
                 usage: None,
-                response_id: Some("resp_1".into()),
             },
             TurnResponse {
                 text: "Write was denied.".into(),
                 tool_calls: vec![],
                 usage: None,
-                response_id: Some("resp_2".into()),
             },
         ]);
 
@@ -335,7 +325,6 @@ mod tests {
             text: "Hello!".into(),
             tool_calls: vec![],
             usage: None,
-            response_id: None,
         }]);
 
         let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
@@ -370,14 +359,12 @@ mod tests {
                     arguments: format!(r#"{{"path": "{}"}}"#, path),
                 }],
                 usage: None,
-                response_id: None,
-            },
+                },
             TurnResponse {
                 text: "The file says test content.".into(),
                 tool_calls: vec![],
                 usage: None,
-                response_id: None,
-            },
+                },
         ]);
 
         let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
@@ -401,7 +388,6 @@ mod tests {
             text: String::new(),
             tool_calls: vec![],
             usage: None,
-            response_id: None,
         }]);
 
         let agent = Agent::new(&mock, std::path::Path::new("/tmp"));

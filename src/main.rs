@@ -12,10 +12,13 @@ mod util;
 use agent::Agent;
 use anyhow::{Context, Result};
 use api::GrokClient;
+use chrono::Utc;
 use clap::Parser;
 use colored::Colorize;
+use context_assembler::ContextAssembler;
 use permissions::{PermissionMode, SessionPermissions};
 use rustyline::DefaultEditor;
+use session::{SessionIndex, SessionMeta, Transcript, TranscriptEntry};
 use serde_json::json;
 use std::io::{Write, stdout};
 
@@ -82,6 +85,14 @@ async fn main() -> Result<()> {
     let cwd = std::env::current_dir().context("Failed to get current directory")?;
     let project_root = util::detect_project_root(&cwd);
 
+    // --- Session setup ---
+    let sessions_dir = SessionIndex::default_sessions_dir()?;
+    let mut session_meta = SessionMeta::new(&model, project_root.display().to_string());
+    let transcript = Transcript::new(
+        SessionMeta::transcript_path(&sessions_dir, &session_meta.session_id),
+    );
+    session_meta.save(&sessions_dir)?;
+
     println!("{}", "grox — agentic coding with Grok".bold());
     println!(
         "model: {}  |  project: {}  |  mode: {}  |  type {} to exit",
@@ -94,6 +105,10 @@ async fn main() -> Result<()> {
         "{}",
         "note: grox can read any file on your system. File contents are sent to xAI and stored for 30 days."
             .dimmed()
+    );
+    println!(
+        "{}",
+        format!("session: {}", &session_meta.session_id[..8]).dimmed()
     );
     println!();
 
@@ -135,6 +150,9 @@ async fn main() -> Result<()> {
         "content": system_content
     });
 
+    let mut assembler = ContextAssembler::new(system_prompt);
+    let mut history: Vec<TranscriptEntry> = Vec::new();
+
     let mut rl = DefaultEditor::new()?;
 
     loop {
@@ -161,6 +179,7 @@ async fn main() -> Result<()> {
                 println!("{}", "usage: /model <name>".dimmed());
             } else {
                 client.set_model(new_model.clone());
+                session_meta.model = new_model.clone();
                 println!("  model switched to {}", new_model.cyan());
             }
             continue;
@@ -170,6 +189,7 @@ async fn main() -> Result<()> {
             println!("  model:   {}", client.model().cyan());
             println!("  project: {}", project_root.display().to_string().cyan());
             println!("  mode:    {}", format!("{permission_mode}").cyan());
+            println!("  session: {}", &session_meta.session_id[..8].dimmed());
             println!(
                 "  tools:   {}",
                 tools::Tool::all()
@@ -184,13 +204,13 @@ async fn main() -> Result<()> {
 
         rl.add_history_entry(&input)?;
 
-        let api_input = vec![
-            system_prompt.clone(),
-            json!({
-                "role": "user",
-                "content": input,
-            }),
-        ];
+        // Append user message to history and transcript
+        let user_entry = TranscriptEntry::user_message(&input);
+        history.push(user_entry.clone());
+        transcript.append(&user_entry)?;
+
+        // Build full message array from history
+        let api_input = assembler.build_messages(&history);
 
         println!();
 
@@ -267,6 +287,40 @@ async fn main() -> Result<()> {
                     );
                 }
                 println!();
+
+                // Persist transcript entries and update history
+                let mut had_mutating_tool = false;
+                for entry in &result.entries {
+                    transcript.append(entry)?;
+                    // Check if any tool call was mutating (file_write, file_edit, shell_exec)
+                    if let TranscriptEntry::ToolCall { name, .. } = entry {
+                        if name == "file_write" || name == "file_edit" || name == "shell_exec" {
+                            had_mutating_tool = true;
+                        }
+                    }
+                }
+                history.extend(result.entries);
+
+                // Refresh repo context after mutating tools
+                if had_mutating_tool {
+                    let fresh_ctx = repo_context::RepoContext::gather(&project_root);
+                    let fresh_ctx_text = if fresh_ctx.text.is_empty() {
+                        None
+                    } else {
+                        Some(fresh_ctx.text.as_str())
+                    };
+                    let fresh_system_content = prompt::build_system_prompt(
+                        &project_root,
+                        fresh_ctx_text,
+                        grox_md.as_deref(),
+                    );
+                    assembler.set_system_prompt(json!({
+                        "role": "system",
+                        "content": fresh_system_content
+                    }));
+                }
+
+                // Update session metadata
                 if let Some(usage) = &result.usage {
                     let cost_str = estimate_cost(client.model(), usage);
                     println!(
@@ -277,8 +331,12 @@ async fn main() -> Result<()> {
                         )
                         .dimmed()
                     );
+                    session_meta.cumulative_input_tokens += usage.input_tokens;
+                    session_meta.cumulative_output_tokens += usage.output_tokens;
                 }
-                // Local-first: no previous_response_id needed
+                session_meta.last_active = Utc::now();
+                // Best-effort metadata save — don't fail the session on metadata errors
+                let _ = session_meta.save(&sessions_dir);
             }
             Err(e) => {
                 eprintln!("\n{} {e}\n", "error:".red().bold());
