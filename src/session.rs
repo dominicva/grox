@@ -165,7 +165,6 @@ impl Transcript {
         Ok(())
     }
 
-    #[allow(dead_code)] // Used in Phase 8 (session resume)
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -195,7 +194,6 @@ impl Transcript {
     /// Read all entries from the transcript file.
     /// Crash recovery: trailing incomplete JSON line is silently discarded.
     /// Empty or missing file returns an empty vec.
-    #[allow(dead_code)] // Used in Phase 8 (session resume)
     pub fn read_all(&self) -> Result<Vec<TranscriptEntry>> {
         if !self.path.exists() {
             return Ok(Vec::new());
@@ -333,7 +331,6 @@ impl SessionMeta {
     }
 
     /// Load session metadata from disk.
-    #[allow(dead_code)] // Used in Phase 8 (session resume)
     pub fn load(sessions_dir: &Path, session_id: &str) -> Result<Self> {
         let path = Self::meta_path(sessions_dir, session_id);
         let content = std::fs::read_to_string(&path)
@@ -362,7 +359,6 @@ impl SessionIndex {
 
     /// List all sessions, sorted by last_active (most recent first).
     /// Creates the sessions directory if it doesn't exist.
-    #[allow(dead_code)] // Used in Phase 8 (session resume)
     pub fn list(sessions_dir: &Path) -> Result<Vec<SessionMeta>> {
         std::fs::create_dir_all(sessions_dir)
             .with_context(|| format!("Failed to create sessions dir: {}", sessions_dir.display()))?;
@@ -393,7 +389,6 @@ impl SessionIndex {
     }
 
     /// List sessions filtered to a specific project root.
-    #[allow(dead_code)] // Used in Phase 8 (session resume)
     pub fn list_for_project(sessions_dir: &Path, project_root: &str) -> Result<Vec<SessionMeta>> {
         let all = Self::list(sessions_dir)?;
         Ok(all.into_iter().filter(|s| s.project_root == project_root).collect())
@@ -867,5 +862,181 @@ mod tests {
             SessionMeta::transcript_path(dir, id),
             PathBuf::from("/home/user/.grox/sessions/abc-123.jsonl")
         );
+    }
+
+    // --- Session resume (Phase 8) ---
+
+    #[test]
+    fn resume_loads_transcript_and_rebuilds_history() {
+        let dir = tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+
+        // Create a session with some history
+        let meta = SessionMeta::new("grok-3", "/test/project");
+        meta.save(&sessions_dir).unwrap();
+
+        let transcript = Transcript::new(SessionMeta::transcript_path(&sessions_dir, &meta.session_id));
+        let entries = vec![
+            TranscriptEntry::user_message("hello"),
+            TranscriptEntry::assistant_message("hi there"),
+            TranscriptEntry::tool_call("c1", "file_read", r#"{"path":"main.rs"}"#),
+            TranscriptEntry::tool_result("c1", "file_read", "fn main() {}"),
+            TranscriptEntry::assistant_message("Here is the file."),
+            TranscriptEntry::user_message("thanks"),
+            TranscriptEntry::assistant_message("You're welcome!"),
+        ];
+        for entry in &entries {
+            transcript.append(entry).unwrap();
+        }
+
+        // Simulate resume: load metadata, read transcript
+        let loaded_meta = SessionMeta::load(&sessions_dir, &meta.session_id).unwrap();
+        let loaded_transcript = Transcript::new(
+            SessionMeta::transcript_path(&sessions_dir, &loaded_meta.session_id),
+        );
+        let loaded_entries = loaded_transcript.read_all().unwrap();
+
+        assert_eq!(loaded_meta.session_id, meta.session_id);
+        assert_eq!(loaded_entries.len(), entries.len());
+        assert_eq!(loaded_entries, entries);
+    }
+
+    #[test]
+    fn resume_new_messages_append_to_existing_transcript() {
+        let dir = tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+
+        let meta = SessionMeta::new("grok-3", "/test");
+        meta.save(&sessions_dir).unwrap();
+
+        let transcript = Transcript::new(SessionMeta::transcript_path(&sessions_dir, &meta.session_id));
+        transcript.append(&TranscriptEntry::user_message("first")).unwrap();
+        transcript.append(&TranscriptEntry::assistant_message("response")).unwrap();
+
+        // Simulate resume: read existing entries
+        let mut history = transcript.read_all().unwrap();
+        assert_eq!(history.len(), 2);
+
+        // New turn appended after resume
+        let new_entry = TranscriptEntry::user_message("second");
+        transcript.append(&new_entry).unwrap();
+        history.push(new_entry);
+
+        // Verify all entries persist
+        let final_entries = transcript.read_all().unwrap();
+        assert_eq!(final_entries.len(), 3);
+        assert_eq!(final_entries, history);
+    }
+
+    #[test]
+    fn resume_most_recent_for_project() {
+        let dir = tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+
+        let mut old = SessionMeta::new("grok-3", "/my/project");
+        old.last_active = DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z").unwrap().into();
+        old.save(&sessions_dir).unwrap();
+
+        let mut recent = SessionMeta::new("grok-3", "/my/project");
+        recent.last_active = DateTime::parse_from_rfc3339("2025-06-01T00:00:00Z").unwrap().into();
+        recent.save(&sessions_dir).unwrap();
+
+        // Different project — should not be selected
+        let mut other = SessionMeta::new("grok-3", "/other/project");
+        other.last_active = DateTime::parse_from_rfc3339("2025-12-01T00:00:00Z").unwrap().into();
+        other.save(&sessions_dir).unwrap();
+
+        let project_sessions = SessionIndex::list_for_project(&sessions_dir, "/my/project").unwrap();
+        let most_recent = project_sessions.first().unwrap();
+        assert_eq!(most_recent.session_id, recent.session_id);
+    }
+
+    #[test]
+    fn resume_prefix_match_finds_session() {
+        let dir = tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+
+        let meta = SessionMeta::new("grok-3", "/test");
+        meta.save(&sessions_dir).unwrap();
+
+        let prefix = &meta.session_id[..8];
+        let all = SessionIndex::list(&sessions_dir).unwrap();
+        let matches: Vec<_> = all.into_iter()
+            .filter(|s| s.session_id.starts_with(prefix))
+            .collect();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].session_id, meta.session_id);
+    }
+
+    #[test]
+    fn resume_graceful_error_on_missing_transcript() {
+        let dir = tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+
+        // Create metadata but no transcript file
+        let meta = SessionMeta::new("grok-3", "/test");
+        meta.save(&sessions_dir).unwrap();
+
+        // Reading a missing transcript should return empty, not error
+        let transcript = Transcript::new(SessionMeta::transcript_path(&sessions_dir, &meta.session_id));
+        let entries = transcript.read_all().unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn resume_graceful_error_on_corrupt_transcript() {
+        let dir = tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+
+        let meta = SessionMeta::new("grok-3", "/test");
+        meta.save(&sessions_dir).unwrap();
+
+        // Write corrupt data to transcript
+        let transcript_path = SessionMeta::transcript_path(&sessions_dir, &meta.session_id);
+        std::fs::write(&transcript_path, "not valid json at all\nmore garbage\n").unwrap();
+
+        // Should recover gracefully — discard unparseable lines
+        let transcript = Transcript::new(&transcript_path);
+        let entries = transcript.read_all().unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn resume_partial_corrupt_transcript_recovers_valid_entries() {
+        let dir = tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+
+        let meta = SessionMeta::new("grok-3", "/test");
+        meta.save(&sessions_dir).unwrap();
+
+        let valid_entry = TranscriptEntry::user_message("hello");
+        let valid_json = serde_json::to_string(&valid_entry).unwrap();
+
+        // Valid entry followed by corrupt data
+        let transcript_path = SessionMeta::transcript_path(&sessions_dir, &meta.session_id);
+        std::fs::write(&transcript_path, format!("{valid_json}\ncorrupt data here\n")).unwrap();
+
+        let transcript = Transcript::new(&transcript_path);
+        let entries = transcript.read_all().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0], valid_entry);
+    }
+
+    #[test]
+    fn session_meta_last_active_updates_on_save() {
+        let dir = tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+
+        let mut meta = SessionMeta::new("grok-3", "/test");
+        let original_time = meta.last_active;
+        meta.save(&sessions_dir).unwrap();
+
+        // Simulate a turn: update last_active and save
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        meta.last_active = Utc::now();
+        meta.save(&sessions_dir).unwrap();
+
+        let loaded = SessionMeta::load(&sessions_dir, &meta.session_id).unwrap();
+        assert!(loaded.last_active > original_time);
     }
 }
