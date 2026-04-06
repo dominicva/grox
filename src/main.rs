@@ -47,6 +47,10 @@ struct Cli {
     /// YOLO mode: auto-approve everything, including destructive commands
     #[arg(long, conflicts_with_all = ["auto_approve_writes", "read_only"])]
     yolo: bool,
+
+    /// Resume a previous session (optionally specify session ID; defaults to most recent for this project)
+    #[arg(long, num_args = 0..=1, default_missing_value = "")]
+    resume: Option<String>,
 }
 
 #[tokio::main]
@@ -90,12 +94,56 @@ async fn main() -> Result<()> {
 
     // --- Session setup ---
     let sessions_dir = SessionIndex::default_sessions_dir()?;
-    let mut session_meta = SessionMeta::new(&model, project_root.display().to_string());
-    let transcript = Transcript::new(
-        SessionMeta::transcript_path(&sessions_dir, &session_meta.session_id),
-    );
-    transcript.create()?;
-    session_meta.save(&sessions_dir)?;
+    let (mut session_meta, mut transcript, mut history, resumed) = if let Some(ref resume_arg) = cli.resume {
+        // Resume an existing session
+        let resume_id = resume_arg.trim();
+        let meta = if resume_id.is_empty() {
+            // No ID specified — resume most recent session for this project
+            let project_sessions = SessionIndex::list_for_project(
+                &sessions_dir,
+                &project_root.display().to_string(),
+            )?;
+            match project_sessions.into_iter().next() {
+                Some(m) => m,
+                None => {
+                    eprintln!("{}", "no previous sessions found for this project".red().bold());
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            // ID specified — find by prefix match
+            let all = SessionIndex::list(&sessions_dir)?;
+            let matches: Vec<_> = all.into_iter()
+                .filter(|s| s.session_id.starts_with(resume_id))
+                .collect();
+            match matches.len() {
+                0 => {
+                    eprintln!("{}", format!("no session found matching '{resume_id}'").red().bold());
+                    std::process::exit(1);
+                }
+                1 => matches.into_iter().next().unwrap(),
+                n => {
+                    eprintln!("{}", format!("'{resume_id}' matches {n} sessions — be more specific:").red().bold());
+                    for m in &matches {
+                        eprintln!("  {} ({})", &m.session_id[..8], m.last_active.format("%Y-%m-%d %H:%M"));
+                    }
+                    std::process::exit(1);
+                }
+            }
+        };
+
+        let t = Transcript::new(SessionMeta::transcript_path(&sessions_dir, &meta.session_id));
+        let entries = t.read_all()
+            .with_context(|| format!("failed to read transcript for session {}", &meta.session_id[..8]))?;
+        (meta, t, entries, true)
+    } else {
+        // New session
+        let meta = SessionMeta::new(&model, project_root.display().to_string());
+        let t = Transcript::new(SessionMeta::transcript_path(&sessions_dir, &meta.session_id));
+        t.create()?;
+        meta.save(&sessions_dir)?;
+        (meta, t, Vec::new(), false)
+    };
 
     println!("{}", "grox — agentic coding with Grok".bold());
     println!(
@@ -110,10 +158,29 @@ async fn main() -> Result<()> {
         "note: grox can read any file on your system. File contents are sent to xAI and stored for 30 days."
             .dimmed()
     );
-    println!(
-        "{}",
-        format!("session: {}", &session_meta.session_id[..8]).dimmed()
-    );
+    if resumed {
+        println!(
+            "{}",
+            format!("session: {} (resumed)", &session_meta.session_id[..8]).dimmed()
+        );
+        // Show brief summary of previous state
+        let user_turns = history.iter().filter(|e| matches!(e, TranscriptEntry::UserMessage { .. })).count();
+        let assistant_turns = history.iter().filter(|e| matches!(e, TranscriptEntry::AssistantMessage { .. })).count();
+        println!(
+            "{}",
+            format!(
+                "  {} user turns, {} assistant responses — last active {}",
+                user_turns,
+                assistant_turns,
+                session_meta.last_active.format("%Y-%m-%d %H:%M UTC")
+            ).dimmed()
+        );
+    } else {
+        println!(
+            "{}",
+            format!("session: {}", &session_meta.session_id[..8]).dimmed()
+        );
+    }
     println!();
 
     let mut session_perms = SessionPermissions::new(permission_mode, project_root.clone());
@@ -155,7 +222,6 @@ async fn main() -> Result<()> {
     });
 
     let mut assembler = ContextAssembler::new(system_prompt);
-    let mut history: Vec<TranscriptEntry> = Vec::new();
 
     let mut rl = DefaultEditor::new()?;
 
@@ -260,6 +326,98 @@ async fn main() -> Result<()> {
                 }
                 Err(e) => {
                     println!("{}", format!("  undo failed: {e}").red());
+                }
+            }
+            continue;
+        }
+
+        if input == "/sessions" {
+            let project_str = project_root.display().to_string();
+            match SessionIndex::list_for_project(&sessions_dir, &project_str) {
+                Ok(sessions) if sessions.is_empty() => {
+                    println!("{}", "  no sessions found for this project".dimmed());
+                }
+                Ok(sessions) => {
+                    println!("  {}", "recent sessions:".bold());
+                    for (i, s) in sessions.iter().take(10).enumerate() {
+                        let active = if s.session_id == session_meta.session_id { " (current)" } else { "" };
+                        println!(
+                            "  {}. {} — {} — {} in / {} out{}",
+                            i + 1,
+                            &s.session_id[..8].cyan(),
+                            s.last_active.format("%Y-%m-%d %H:%M").to_string().dimmed(),
+                            s.cumulative_input_tokens,
+                            s.cumulative_output_tokens,
+                            active.green(),
+                        );
+                    }
+                    println!("{}", "  use /resume <id> to resume a session".dimmed());
+                }
+                Err(e) => {
+                    println!("{}", format!("  failed to list sessions: {e}").red());
+                }
+            }
+            continue;
+        }
+
+        if input == "/resume" || input.starts_with("/resume ") {
+            let id_arg = input.strip_prefix("/resume").unwrap().trim();
+            if id_arg.is_empty() {
+                println!("{}", "  usage: /resume <session-id-prefix>".dimmed());
+                println!("{}", "  use /sessions to see available sessions".dimmed());
+                continue;
+            }
+
+            // Find matching session
+            let all = match SessionIndex::list(&sessions_dir) {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("{}", format!("  failed to list sessions: {e}").red());
+                    continue;
+                }
+            };
+            let matches: Vec<_> = all.into_iter()
+                .filter(|s| s.session_id.starts_with(id_arg))
+                .collect();
+
+            match matches.len() {
+                0 => {
+                    println!("{}", format!("  no session found matching '{id_arg}'").dimmed());
+                }
+                1 => {
+                    let target = &matches[0];
+                    if target.session_id == session_meta.session_id {
+                        println!("{}", "  already in this session".dimmed());
+                        continue;
+                    }
+                    let t = Transcript::new(SessionMeta::transcript_path(&sessions_dir, &target.session_id));
+                    match t.read_all() {
+                        Ok(entries) => {
+                            let user_turns = entries.iter().filter(|e| matches!(e, TranscriptEntry::UserMessage { .. })).count();
+                            let assistant_turns = entries.iter().filter(|e| matches!(e, TranscriptEntry::AssistantMessage { .. })).count();
+                            session_meta = target.clone();
+                            history = entries;
+                            transcript = Transcript::new(
+                                SessionMeta::transcript_path(&sessions_dir, &session_meta.session_id),
+                            );
+                            println!(
+                                "  {} session {} — {} user turns, {} assistant responses",
+                                "resumed".green(),
+                                &session_meta.session_id[..8].cyan(),
+                                user_turns,
+                                assistant_turns,
+                            );
+                        }
+                        Err(e) => {
+                            println!("{}", format!("  failed to read transcript: {e}").red());
+                        }
+                    }
+                }
+                n => {
+                    println!("{}", format!("  '{id_arg}' matches {n} sessions — be more specific:").dimmed());
+                    for m in &matches {
+                        println!("    {} ({})", &m.session_id[..8], m.last_active.format("%Y-%m-%d %H:%M"));
+                    }
                 }
             }
             continue;
