@@ -7,6 +7,7 @@ mod model_profile;
 mod permissions;
 mod prompt;
 mod repo_context;
+mod rewind;
 mod session;
 mod tools;
 mod util;
@@ -209,6 +210,58 @@ async fn main() -> Result<()> {
                     .join(", ")
                     .dimmed()
             );
+            continue;
+        }
+
+        if input == "/undo" || input.starts_with("/undo ") {
+            let args = input.strip_prefix("/undo").unwrap().trim();
+
+            // Parse optional mode flag and turn number
+            let mut mode = rewind::RewindMode::Both;
+            let mut turn_number: Option<usize> = None;
+            let mut parse_error = false;
+
+            for arg in args.split_whitespace() {
+                match arg {
+                    "--code" => mode = rewind::RewindMode::CodeOnly,
+                    "--conversation" => mode = rewind::RewindMode::ConversationOnly,
+                    "--both" => mode = rewind::RewindMode::Both,
+                    _ => {
+                        if let Ok(n) = arg.parse::<usize>() {
+                            turn_number = Some(n);
+                        } else {
+                            println!(
+                                "{}",
+                                format!("  unknown argument: {arg}. usage: /undo [N] [--code|--conversation|--both]")
+                                    .dimmed()
+                            );
+                            parse_error = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if parse_error {
+                continue;
+            }
+
+            let result = if let Some(n) = turn_number {
+                rewind::rewind_to_turn(&history, n, &project_root, mode)
+            } else {
+                rewind::undo_last_turn(&history, &project_root, mode)
+            };
+
+            match result {
+                Ok(rr) => {
+                    println!("{}", rewind::format_rewind_result(&rr).yellow());
+                    history = rr.entries;
+                    transcript.atomic_rewrite(&history)?;
+                }
+                Err(e) => {
+                    println!("{}", format!("  undo failed: {e}").red());
+                }
+            }
             continue;
         }
 
