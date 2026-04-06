@@ -8,12 +8,14 @@ use crate::session::TranscriptEntry;
 /// Number of recent user turns to preserve verbatim during heuristic compaction.
 const RECENT_TURNS: usize = 5;
 
-/// Result of running heuristic compaction.
+/// Result of running compaction (heuristic and/or LLM).
 pub struct CompactionResult {
     /// The compacted transcript entries.
     pub entries: Vec<TranscriptEntry>,
     /// Whether any entries were modified or removed.
     pub compacted: bool,
+    /// Token usage from LLM summarization (None if only heuristic compaction ran).
+    pub llm_usage: Option<crate::api::Usage>,
 }
 
 /// Check whether compaction should fire and, if so, run it.
@@ -53,6 +55,7 @@ pub fn heuristic_compact(entries: &[TranscriptEntry], project_root: &Path) -> Co
         return CompactionResult {
             entries: entries.to_vec(),
             compacted: false,
+            llm_usage: None,
         };
     }
 
@@ -119,6 +122,7 @@ pub fn heuristic_compact(entries: &[TranscriptEntry], project_root: &Path) -> Co
     CompactionResult {
         entries: result,
         compacted,
+        llm_usage: None,
     }
 }
 
