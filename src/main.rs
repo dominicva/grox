@@ -242,23 +242,19 @@ async fn main() -> Result<()> {
         transcript.append(&user_entry)?;
 
         // Preflight budget check: compact if estimated tokens exceed threshold
-        let profile = model_profile::ModelProfile::for_model(client.model());
-        let estimated = assembler.estimate_tokens(&history);
-        if estimated > profile.compaction_threshold() {
-            let result = compaction::heuristic_compact(&history, &project_root);
-            if result.compacted {
-                let new_estimate = assembler.estimate_tokens(&result.entries);
-                history = result.entries;
-                transcript.atomic_rewrite(&history)?;
-                eprintln!(
-                    "{}",
-                    format!(
-                        "  auto-compacted: ~{estimated} → ~{new_estimate} tokens (threshold: {})",
-                        profile.compaction_threshold()
-                    )
-                    .yellow()
-                );
-            }
+        if let Some(result) = compaction::maybe_compact(&history, &assembler, client.model(), &project_root) {
+            let old_estimate = assembler.estimate_tokens(&history);
+            let new_estimate = assembler.estimate_tokens(&result.entries);
+            let threshold = model_profile::ModelProfile::for_model(client.model()).compaction_threshold();
+            history = result.entries;
+            transcript.atomic_rewrite(&history)?;
+            eprintln!(
+                "{}",
+                format!(
+                    "  auto-compacted: ~{old_estimate} → ~{new_estimate} tokens (threshold: {threshold})",
+                )
+                .yellow()
+            );
         }
 
         // Build full message array from history

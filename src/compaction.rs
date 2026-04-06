@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::context_assembler::ContextAssembler;
+use crate::model_profile::ModelProfile;
 use crate::session::TranscriptEntry;
 
 /// Number of recent user turns to preserve verbatim during heuristic compaction.
@@ -12,6 +14,26 @@ pub struct CompactionResult {
     pub entries: Vec<TranscriptEntry>,
     /// Whether any entries were modified or removed.
     pub compacted: bool,
+}
+
+/// Check whether compaction should fire and, if so, run it.
+///
+/// Returns `Some(CompactionResult)` with the compacted entries if compaction
+/// fired and produced changes. Returns `None` if the estimate is below the
+/// threshold or if compaction had no effect.
+pub fn maybe_compact(
+    history: &[TranscriptEntry],
+    assembler: &ContextAssembler,
+    model: &str,
+    project_root: &Path,
+) -> Option<CompactionResult> {
+    let profile = ModelProfile::for_model(model);
+    let estimated = assembler.estimate_tokens(history);
+    if estimated <= profile.compaction_threshold() {
+        return None;
+    }
+    let result = heuristic_compact(history, project_root);
+    if result.compacted { Some(result) } else { None }
 }
 
 /// Run heuristic compaction on transcript entries (no LLM call).
@@ -835,5 +857,78 @@ mod tests {
         if let Some(TranscriptEntry::ToolResult { output, .. }) = se {
             assert!(output.contains("lines omitted"));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // maybe_compact: preflight decision logic
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn maybe_compact_returns_none_below_threshold() {
+        use serde_json::json;
+
+        let assembler = ContextAssembler::new(json!({"role": "system", "content": "short"}));
+        // Small transcript — well below any threshold
+        let mut entries: Vec<TranscriptEntry> = Vec::new();
+        for i in 0..6 {
+            entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
+        }
+
+        let result = maybe_compact(&entries, &assembler, "grok-3", Path::new("/project"));
+        assert!(result.is_none(), "should not compact when below threshold");
+    }
+
+    #[test]
+    fn maybe_compact_returns_some_above_threshold() {
+        use serde_json::json;
+
+        let assembler = ContextAssembler::new(json!({"role": "system", "content": "short"}));
+        let threshold = ModelProfile::for_model("grok-3").compaction_threshold();
+
+        // Build a transcript that exceeds the threshold
+        let big_output = "x".repeat(threshold * 4 + 1000);
+        let mut entries = tool_turn(
+            "q0",
+            "file_read",
+            r#"{"path":"big.rs"}"#,
+            "c0",
+            &big_output,
+            "a0",
+        );
+        for i in 1..=5 {
+            entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
+        }
+
+        let before_estimate = assembler.estimate_tokens(&entries);
+        assert!(before_estimate > threshold, "setup: should exceed threshold");
+
+        let result = maybe_compact(&entries, &assembler, "grok-3", Path::new("/project"));
+        assert!(result.is_some(), "should compact when above threshold");
+
+        let compacted = result.unwrap();
+        let after_estimate = assembler.estimate_tokens(&compacted.entries);
+        assert!(after_estimate < before_estimate, "compaction should reduce estimate");
+    }
+
+    #[test]
+    fn maybe_compact_returns_none_when_above_threshold_but_nothing_to_compact() {
+        use serde_json::json;
+
+        // Use a system prompt large enough to push us over the threshold on its own
+        let threshold = ModelProfile::for_model("grok-3").compaction_threshold();
+        let big_system = "x".repeat(threshold * 4 + 1000);
+        let assembler = ContextAssembler::new(json!({"role": "system", "content": big_system}));
+
+        // Only 3 turns — everything is recent, nothing to compact
+        let mut entries: Vec<TranscriptEntry> = Vec::new();
+        for i in 0..3 {
+            entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
+        }
+
+        let estimate = assembler.estimate_tokens(&entries);
+        assert!(estimate > threshold, "setup: system overhead should exceed threshold");
+
+        let result = maybe_compact(&entries, &assembler, "grok-3", Path::new("/project"));
+        assert!(result.is_none(), "should return None when above threshold but nothing compactable");
     }
 }
