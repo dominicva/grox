@@ -229,7 +229,7 @@ async fn main() -> Result<()> {
                     .yellow()
                 );
             } else {
-                println!("{}", "  nothing to compact (fewer than 5 turns)".dimmed());
+                println!("{}", "  nothing to compact".dimmed());
             }
             continue;
         }
