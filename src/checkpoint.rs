@@ -221,8 +221,8 @@ pub fn resolve_checkpoint_path(path: &str, project_root: &Path) -> PathBuf {
 ///
 /// Unlike `util::validate_path`, this does NOT require the file or its parent
 /// directory to exist (since file_write creates missing parents). Instead it
-/// canonicalizes the project root and checks that the resolved path (with `..`
-/// and `.` components cleaned) stays inside it.
+/// cleans `.` and `..` components first, then canonicalizes whatever ancestor
+/// exists (catching symlink escapes), and checks containment.
 ///
 /// Returns the normalized absolute path on success, or None if the path
 /// escapes the project root.
@@ -230,38 +230,41 @@ pub fn validate_checkpoint_path(abs_path: &Path, project_root: &Path) -> Option<
     // Canonicalize project root (must exist)
     let canonical_root = project_root.canonicalize().ok()?;
 
-    // For the target path, we can't canonicalize (file may not exist).
-    // Instead, clean `.` and `..` components manually, then check containment.
-    // If any existing prefix of the path is a symlink that escapes, we catch
-    // it by canonicalizing whatever ancestor does exist.
-    let mut existing_prefix = abs_path.to_path_buf();
+    // Step 1: Clean . and .. from the path components (without touching the filesystem)
+    let mut cleaned = PathBuf::new();
+    for component in abs_path.components() {
+        match component {
+            std::path::Component::CurDir => {} // skip "."
+            std::path::Component::ParentDir => {
+                // Go up one level
+                cleaned.pop();
+            }
+            other => cleaned.push(other),
+        }
+    }
+
+    // Step 2: Find the longest existing prefix and canonicalize it
+    // (this catches symlink escapes in existing directories)
+    let mut existing_prefix = cleaned.clone();
     let mut suffix_parts: Vec<std::ffi::OsString> = Vec::new();
 
-    // Walk up until we find an ancestor that exists
     while !existing_prefix.exists() {
         if let Some(name) = existing_prefix.file_name() {
             suffix_parts.push(name.to_os_string());
         } else {
-            return None; // degenerate path
+            return None;
         }
         if !existing_prefix.pop() {
             return None;
         }
     }
 
-    // Canonicalize the existing prefix (resolves symlinks)
     let mut normalized = existing_prefix.canonicalize().ok()?;
-
-    // Re-append the non-existing parts
     for part in suffix_parts.into_iter().rev() {
-        let part_str = part.to_string_lossy();
-        if part_str == ".." || part_str == "." {
-            return None; // suspicious — reject
-        }
         normalized.push(part);
     }
 
-    // Check containment
+    // Step 3: Check containment
     if normalized.starts_with(&canonical_root) {
         Some(normalized)
     } else {
@@ -620,6 +623,39 @@ mod tests {
         // Should normalize to the same canonical path
         let canonical = file.canonicalize().unwrap();
         assert_eq!(result.unwrap(), canonical);
+    }
+
+    #[test]
+    fn validate_checkpoint_path_normalizes_dotdot_in_new_path() {
+        let dir = tempdir().unwrap();
+        // subdir/../new.txt should resolve to dir/new.txt
+        let path = dir.path().join("subdir").join("..").join("new.txt");
+        let result = validate_checkpoint_path(&path, dir.path());
+        assert!(result.is_some());
+
+        let canonical_root = dir.path().canonicalize().unwrap();
+        assert_eq!(result.unwrap(), canonical_root.join("new.txt"));
+    }
+
+    #[test]
+    fn validate_checkpoint_path_normalizes_dot_in_new_path() {
+        let dir = tempdir().unwrap();
+        // foo/./bar.txt should resolve to dir/foo/bar.txt
+        let path = dir.path().join("foo").join(".").join("bar.txt");
+        let result = validate_checkpoint_path(&path, dir.path());
+        assert!(result.is_some());
+
+        let canonical_root = dir.path().canonicalize().unwrap();
+        assert_eq!(result.unwrap(), canonical_root.join("foo").join("bar.txt"));
+    }
+
+    #[test]
+    fn validate_checkpoint_path_dotdot_escape_rejected() {
+        let dir = tempdir().unwrap();
+        // Going up past the project root via .. in suffix
+        let path = dir.path().join("..").join("escape.txt");
+        let result = validate_checkpoint_path(&path, dir.path());
+        assert!(result.is_none());
     }
 
     // --- FileSnapshot serialization ---

@@ -95,6 +95,12 @@ impl<'a> Agent<'a> {
                 if !final_text.is_empty() {
                     entries.push(TranscriptEntry::assistant_message(&final_text));
                 }
+                // Ensure all checkpoints in this turn carry the final
+                // shell_exec flag (shell_exec may have happened in an earlier
+                // iteration before or after checkpoint-producing iterations).
+                if turn_had_shell_exec {
+                    patch_checkpoint_shell_flag(&mut entries);
+                }
                 return Ok(AgentResult {
                     text: final_text,
                     usage: cumulative_usage,
@@ -222,11 +228,25 @@ impl<'a> Agent<'a> {
         }
 
         // Hit max turns
+        if turn_had_shell_exec {
+            patch_checkpoint_shell_flag(&mut entries);
+        }
         Ok(AgentResult {
             text: final_text,
             usage: cumulative_usage,
             entries,
         })
+    }
+}
+
+/// Retroactively set `has_shell_exec = true` on all Checkpoint entries.
+/// Called at the end of a user turn when shell_exec happened in any iteration,
+/// since checkpoints emitted in earlier iterations wouldn't have seen it yet.
+fn patch_checkpoint_shell_flag(entries: &mut [TranscriptEntry]) {
+    for entry in entries.iter_mut() {
+        if let TranscriptEntry::Checkpoint { has_shell_exec, .. } = entry {
+            *has_shell_exec = true;
+        }
     }
 }
 
@@ -1114,6 +1134,63 @@ mod tests {
             assert!(
                 has_shell_exec,
                 "checkpoint should flag shell_exec from earlier iteration"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_exec_warning_after_file_modification() {
+        // Iteration 1: file_write (checkpoint emitted with false)
+        // Iteration 2: shell_exec only (no new checkpoint)
+        // The existing checkpoint should be retroactively patched to true
+        let repo = setup_git_repo();
+        let file_path = repo.path().join("test.txt");
+
+        let mock = MockGrokApi::new(vec![
+            // Iteration 1: file_write
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_1".into(),
+                    name: "file_write".into(),
+                    arguments: format!(r#"{{"path": "{}", "content": "data"}}"#, file_path.display()),
+                }],
+                usage: None,
+            },
+            // Iteration 2: shell_exec only
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_2".into(),
+                    name: "shell_exec".into(),
+                    arguments: r#"{"command": "echo side-effect"}"#.into(),
+                }],
+                usage: None,
+            },
+            TurnResponse {
+                text: "Done.".into(),
+                tool_calls: vec![],
+                usage: None,
+            },
+        ]);
+
+        let agent = Agent::new(&mock, repo.path());
+        let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "go"})];
+
+        let result = agent
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh)
+            .await
+            .unwrap();
+
+        let checkpoint_entries: Vec<_> = result.entries.iter()
+            .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
+            .collect();
+        assert_eq!(checkpoint_entries.len(), 1);
+
+        if let TranscriptEntry::Checkpoint { has_shell_exec, .. } = &checkpoint_entries[0] {
+            assert!(
+                has_shell_exec,
+                "checkpoint should be retroactively patched with shell_exec from later iteration"
             );
         }
     }
