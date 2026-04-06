@@ -44,8 +44,18 @@ async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
     let cli = Cli::parse();
 
-    let api_key =
-        std::env::var("XAI_API_KEY").context("XAI_API_KEY environment variable not set")?;
+    let api_key = match std::env::var("XAI_API_KEY") {
+        Ok(key) if !key.is_empty() => key,
+        _ => {
+            eprintln!("{}", "XAI_API_KEY is not set.".red().bold());
+            eprintln!();
+            eprintln!("Get your API key at: {}", "https://console.x.ai/".cyan());
+            eprintln!("Then export it in your shell:");
+            eprintln!();
+            eprintln!("  {}", "export XAI_API_KEY=your-key-here".dimmed());
+            std::process::exit(1);
+        }
+    };
 
     let model = cli.model
         .unwrap_or_else(|| std::env::var("GROX_MODEL").unwrap_or_else(|_| "grok-3-fast".to_string()));
