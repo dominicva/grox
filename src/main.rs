@@ -3,6 +3,7 @@ mod api;
 mod model_profile;
 mod permissions;
 mod prompt;
+mod repo_context;
 mod tools;
 mod util;
 
