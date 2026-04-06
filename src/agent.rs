@@ -24,21 +24,19 @@ impl<'a> Agent<'a> {
     }
 
     /// Run the agent loop for a single user message.
-    /// Returns the final text response and optional response_id for continuation.
+    /// Returns the final text response and usage info.
     ///
     /// `on_authorize` is called before executing each tool. It receives the tool name
     /// and arguments, and returns true if the tool should be executed.
     pub async fn run(
         &self,
         input: Vec<Value>,
-        previous_response_id: Option<&str>,
         on_token: &mut (dyn FnMut(String) + Send),
         on_tool_call: &mut (dyn FnMut(&str, &str) + Send),
         on_tool_result: &mut (dyn FnMut(&str, &str) + Send),
         on_authorize: &mut (dyn FnMut(&str, &str) -> bool + Send),
     ) -> Result<AgentResult> {
         let mut current_input = input;
-        let mut current_response_id = previous_response_id.map(String::from);
         let mut final_text = String::new();
 
         for _turn in 0..MAX_TURNS {
@@ -47,18 +45,15 @@ impl<'a> Agent<'a> {
                 .send_turn(
                     current_input.clone(),
                     &self.tool_defs,
-                    current_response_id.as_deref(),
                     on_token,
                 )
                 .await?;
 
             final_text = response.text.clone();
-            current_response_id = response.response_id.clone();
 
             if response.tool_calls.is_empty() {
                 return Ok(AgentResult {
                     text: final_text,
-                    response_id: current_response_id,
                     usage: response.usage,
                 });
             }
@@ -97,7 +92,6 @@ impl<'a> Agent<'a> {
         // Hit max turns
         Ok(AgentResult {
             text: final_text,
-            response_id: current_response_id,
             usage: None,
         })
     }
@@ -106,7 +100,6 @@ impl<'a> Agent<'a> {
 #[derive(Debug)]
 pub struct AgentResult {
     pub text: String,
-    pub response_id: Option<String>,
     pub usage: Option<crate::api::Usage>,
 }
 
@@ -151,12 +144,11 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "read the file"})];
 
         let result = agent
-            .run(input, None, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all)
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all)
             .await
             .unwrap();
 
         assert_eq!(result.text, "The file contains a main function.");
-        assert_eq!(result.response_id, Some("resp_2".into()));
     }
 
     #[tokio::test]
@@ -184,7 +176,7 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "read /nonexistent/file.rs"})];
 
         let result = agent
-            .run(input, None, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all)
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all)
             .await
             .unwrap();
 
@@ -204,7 +196,7 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "hello"})];
 
         let result = agent
-            .run(input, None, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all)
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all)
             .await
             .unwrap();
 
@@ -231,7 +223,7 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "loop forever"})];
 
         let result = agent
-            .run(input, None, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all)
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all)
             .await
             .unwrap();
 
@@ -263,7 +255,7 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "use a fake tool"})];
 
         let result = agent
-            .run(input, None, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all)
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all)
             .await
             .unwrap();
 
@@ -297,7 +289,7 @@ mod tests {
         let mut deny_all = |_: &str, _: &str| -> bool { false };
 
         let result = agent
-            .run(input, None, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut deny_all)
+            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut deny_all)
             .await
             .unwrap();
 

@@ -29,7 +29,6 @@ pub trait GrokApi: Send + Sync {
         &self,
         input: Vec<Value>,
         tools: &[Value],
-        previous_response_id: Option<&str>,
         on_token: &mut (dyn FnMut(String) + Send),
     ) -> Result<TurnResponse>;
 }
@@ -68,8 +67,6 @@ struct ResponsesRequest {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<Value>,
     stream: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    previous_response_id: Option<String>,
     // Disable parallel tool calls — we execute sequentially
     #[serde(skip_serializing_if = "Option::is_none")]
     parallel_tool_calls: Option<bool>,
@@ -86,7 +83,6 @@ impl GrokApi for GrokClient {
         &self,
         input: Vec<Value>,
         tools: &[Value],
-        previous_response_id: Option<&str>,
         on_token: &mut (dyn FnMut(String) + Send),
     ) -> Result<TurnResponse> {
         let body = ResponsesRequest {
@@ -94,7 +90,6 @@ impl GrokApi for GrokClient {
             input,
             tools: tools.to_vec(),
             stream: true,
-            previous_response_id: previous_response_id.map(String::from),
             parallel_tool_calls: if tools.is_empty() { None } else { Some(false) },
         };
 
@@ -265,7 +260,6 @@ pub mod mock {
             &self,
             _input: Vec<Value>,
             _tools: &[Value],
-            _previous_response_id: Option<&str>,
             on_token: &mut (dyn FnMut(String) + Send),
         ) -> Result<TurnResponse> {
             let mut responses = self.responses.lock().unwrap();

@@ -1,10 +1,10 @@
 mod agent;
 mod api;
+mod context_assembler;
 mod model_profile;
 mod permissions;
 mod prompt;
 mod repo_context;
-#[allow(dead_code)] // Wired into runtime in Phase 4
 mod session;
 mod tools;
 mod util;
@@ -135,7 +135,6 @@ async fn main() -> Result<()> {
         "content": system_content
     });
 
-    let mut previous_response_id: Option<String> = None;
     let mut rl = DefaultEditor::new()?;
 
     loop {
@@ -199,7 +198,6 @@ async fn main() -> Result<()> {
         match agent
             .run(
                 api_input,
-                previous_response_id.as_deref(),
                 &mut {
                     let mut first_token = true;
                     move |token: String| {
@@ -280,7 +278,7 @@ async fn main() -> Result<()> {
                         .dimmed()
                     );
                 }
-                previous_response_id = result.response_id;
+                // Local-first: no previous_response_id needed
             }
             Err(e) => {
                 eprintln!("\n{} {e}\n", "error:".red().bold());
