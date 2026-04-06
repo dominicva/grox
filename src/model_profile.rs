@@ -50,6 +50,13 @@ impl ModelProfile {
         }
     }
 
+    /// Compaction threshold: 60% of the effective ceiling.
+    /// When estimated tokens exceed this, heuristic compaction fires.
+    #[allow(dead_code)] // Used in Phase 5 (compaction triggers in main.rs)
+    pub fn compaction_threshold(&self) -> usize {
+        self.effective_ceiling * 60 / 100
+    }
+
     /// Estimate cost for a given usage.
     pub fn estimate_cost(&self, input_tokens: u64, output_tokens: u64) -> Option<f64> {
         if self.input_price == 0.0 && self.output_price == 0.0 {
@@ -128,6 +135,14 @@ mod tests {
     fn estimate_cost_unknown_model_returns_none() {
         let p = ModelProfile::for_model("unknown");
         assert!(p.estimate_cost(1000, 500).is_none());
+    }
+
+    #[test]
+    fn compaction_threshold_is_60_percent_of_ceiling() {
+        let p = ModelProfile::for_model("grok-3");
+        assert_eq!(p.compaction_threshold(), p.effective_ceiling * 60 / 100);
+        // 80_000 * 60 / 100 = 48_000
+        assert_eq!(p.compaction_threshold(), 48_000);
     }
 
     #[test]

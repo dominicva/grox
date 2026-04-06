@@ -1,5 +1,6 @@
 mod agent;
 mod api;
+mod compaction;
 mod context_assembler;
 mod model_profile;
 mod permissions;
