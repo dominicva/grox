@@ -90,9 +90,25 @@ pub async fn maybe_compact(
     // Layer 2: LLM compaction on the heuristic-compacted entries
     match llm_compact(&heuristic_result.entries, model, api).await {
         Ok(llm_result) if llm_result.compacted => Some(llm_result),
-        Ok(_) => {
-            // LLM compaction didn't help — return heuristic result if it did anything
-            if heuristic_result.compacted { Some(heuristic_result) } else { None }
+        Ok(llm_result) => {
+            // LLM compaction didn't help (e.g. summary was too verbose).
+            // Carry the LLM usage through — tokens were still spent.
+            if heuristic_result.compacted {
+                Some(CompactionResult {
+                    llm_usage: llm_result.llm_usage,
+                    ..heuristic_result
+                })
+            } else {
+                // Nothing compacted, but if LLM tokens were spent, report them
+                match llm_result.llm_usage {
+                    Some(_) => Some(CompactionResult {
+                        entries: history.to_vec(),
+                        compacted: false,
+                        llm_usage: llm_result.llm_usage,
+                    }),
+                    None => None,
+                }
+            }
         }
         Err(e) => {
             eprintln!("  warning: LLM compaction failed: {e}");
@@ -1226,6 +1242,45 @@ mod tests {
         assert!(compacted.llm_usage.is_some(), "should have LLM usage");
         // First entry should be a CompactionSummary
         assert!(matches!(&compacted.entries[0], TranscriptEntry::CompactionSummary { .. }));
+    }
+
+    #[tokio::test]
+    async fn maybe_compact_propagates_usage_from_rejected_llm() {
+        use crate::api::TurnResponse;
+        use crate::api::mock::MockGrokApi;
+        use serde_json::json;
+
+        let threshold = ModelProfile::for_model("grok-3").compaction_threshold();
+
+        // Big user messages that heuristic can't compact
+        let big_msg = "x".repeat(threshold * 2);
+        let assembler = ContextAssembler::new(json!({"role": "system", "content": "short"}));
+
+        // LLM returns a verbose summary that's LARGER than old entries
+        let verbose_summary = "y".repeat(threshold * 4);
+        let mock = MockGrokApi::new(vec![TurnResponse {
+            text: verbose_summary,
+            tool_calls: vec![],
+            usage: Some(crate::api::Usage { input_tokens: 5000, output_tokens: 3000 }),
+        }]);
+
+        let mut entries = vec![
+            TranscriptEntry::user_message(&big_msg),
+            TranscriptEntry::assistant_message(&big_msg),
+        ];
+        for i in 1..=5 {
+            entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
+        }
+
+        let result = maybe_compact(&entries, &assembler, "grok-3", Path::new("/project"), &mock).await;
+        assert!(result.is_some(), "should return Some to carry LLM usage");
+
+        let compacted = result.unwrap();
+        // Compaction was rejected (summary too large), but usage is preserved
+        assert!(!compacted.compacted, "should not accept verbose summary");
+        let usage = compacted.llm_usage.expect("LLM usage should be propagated");
+        assert_eq!(usage.input_tokens, 5000);
+        assert_eq!(usage.output_tokens, 3000);
     }
 
     // -----------------------------------------------------------------------

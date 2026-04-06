@@ -224,7 +224,13 @@ async fn main() -> Result<()> {
             let result = if after_heuristic > threshold {
                 match compaction::llm_compact(&heuristic.entries, client.model(), &client).await {
                     Ok(llm_result) if llm_result.compacted => llm_result,
-                    Ok(_) => heuristic,
+                    Ok(llm_result) => {
+                        // LLM didn't help — carry usage into fallback
+                        compaction::CompactionResult {
+                            llm_usage: llm_result.llm_usage,
+                            ..heuristic
+                        }
+                    }
                     Err(e) => {
                         eprintln!("{}", format!("  warning: LLM compaction failed: {e}").yellow());
                         heuristic
@@ -234,6 +240,13 @@ async fn main() -> Result<()> {
                 heuristic
             };
 
+            // Always account for LLM usage even if compaction didn't reduce size
+            if let Some(u) = &result.llm_usage {
+                session_meta.cumulative_input_tokens += u.input_tokens;
+                session_meta.cumulative_output_tokens += u.output_tokens;
+                let _ = session_meta.save(&sessions_dir);
+            }
+
             if result.compacted {
                 let new_estimate = assembler.estimate_tokens(&result.entries);
                 let new_count = result.entries.len();
@@ -241,12 +254,6 @@ async fn main() -> Result<()> {
                     let profile = model_profile::ModelProfile::for_model(client.model());
                     profile.estimate_cost(u.input_tokens, u.output_tokens)
                 });
-                // Add LLM compaction usage to cumulative session totals
-                if let Some(u) = &result.llm_usage {
-                    session_meta.cumulative_input_tokens += u.input_tokens;
-                    session_meta.cumulative_output_tokens += u.output_tokens;
-                    let _ = session_meta.save(&sessions_dir);
-                }
                 history = result.entries;
                 transcript.atomic_rewrite(&history)?;
                 let mut msg = format!(
@@ -258,7 +265,15 @@ async fn main() -> Result<()> {
                 }
                 println!("{}", msg.yellow());
             } else {
-                println!("{}", "  nothing to compact".dimmed());
+                let llm_cost = result.llm_usage.as_ref().and_then(|u| {
+                    let profile = model_profile::ModelProfile::for_model(client.model());
+                    profile.estimate_cost(u.input_tokens, u.output_tokens)
+                });
+                if let Some(cost) = llm_cost {
+                    println!("{}", format!("  nothing to compact (LLM summarization attempt: ~${cost:.4})").yellow());
+                } else {
+                    println!("{}", "  nothing to compact".dimmed());
+                }
             }
             continue;
         }
@@ -272,28 +287,30 @@ async fn main() -> Result<()> {
 
         // Preflight budget check: compact if estimated tokens exceed threshold
         if let Some(result) = compaction::maybe_compact(&history, &assembler, client.model(), &project_root, &client).await {
-            let old_estimate = assembler.estimate_tokens(&history);
-            let new_estimate = assembler.estimate_tokens(&result.entries);
-            let threshold = model_profile::ModelProfile::for_model(client.model()).compaction_threshold();
-            let llm_cost = result.llm_usage.as_ref().and_then(|u| {
-                let profile = model_profile::ModelProfile::for_model(client.model());
-                profile.estimate_cost(u.input_tokens, u.output_tokens)
-            });
-            // Add LLM compaction usage to cumulative session totals
+            // Always account for LLM usage even if compaction didn't reduce size
             if let Some(u) = &result.llm_usage {
                 session_meta.cumulative_input_tokens += u.input_tokens;
                 session_meta.cumulative_output_tokens += u.output_tokens;
                 let _ = session_meta.save(&sessions_dir);
             }
-            history = result.entries;
-            transcript.atomic_rewrite(&history)?;
-            let mut msg = format!(
-                "  auto-compacted: ~{old_estimate} → ~{new_estimate} tokens (threshold: {threshold})",
-            );
-            if let Some(cost) = llm_cost {
-                msg.push_str(&format!(" [LLM summarization: ~${cost:.4}]"));
+            if result.compacted {
+                let old_estimate = assembler.estimate_tokens(&history);
+                let new_estimate = assembler.estimate_tokens(&result.entries);
+                let threshold = model_profile::ModelProfile::for_model(client.model()).compaction_threshold();
+                let llm_cost = result.llm_usage.as_ref().and_then(|u| {
+                    let profile = model_profile::ModelProfile::for_model(client.model());
+                    profile.estimate_cost(u.input_tokens, u.output_tokens)
+                });
+                history = result.entries;
+                transcript.atomic_rewrite(&history)?;
+                let mut msg = format!(
+                    "  auto-compacted: ~{old_estimate} → ~{new_estimate} tokens (threshold: {threshold})",
+                );
+                if let Some(cost) = llm_cost {
+                    msg.push_str(&format!(" [LLM summarization: ~${cost:.4}]"));
+                }
+                eprintln!("{}", msg.yellow());
             }
-            eprintln!("{}", msg.yellow());
         }
 
         // Build full message array from history
