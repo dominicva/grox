@@ -71,6 +71,7 @@ async fn main() -> Result<()> {
         }
     };
 
+    let user_specified_model = cli.model.is_some() || std::env::var("GROX_MODEL").is_ok();
     let model = cli.model
         .unwrap_or_else(|| std::env::var("GROX_MODEL").unwrap_or_else(|_| "grok-3-fast".to_string()));
 
@@ -132,9 +133,46 @@ async fn main() -> Result<()> {
             }
         };
 
-        let t = Transcript::new(SessionMeta::transcript_path(&sessions_dir, &meta.session_id));
+        // Warn if resuming a session from a different project
+        let current_project = project_root.display().to_string();
+        if meta.project_root != current_project {
+            eprintln!(
+                "{}",
+                format!(
+                    "  warning: session {} was created in '{}', but you are in '{}'",
+                    &meta.session_id[..8], meta.project_root, current_project
+                ).yellow()
+            );
+            eprintln!(
+                "{}",
+                "  tools will operate on the current directory, not the original project"
+                    .yellow()
+            );
+        }
+
+        let transcript_path = SessionMeta::transcript_path(&sessions_dir, &meta.session_id);
+        let t = Transcript::new(&transcript_path);
+        if !transcript_path.exists() {
+            eprintln!(
+                "{}",
+                format!(
+                    "  warning: transcript file missing for session {} — starting with empty history",
+                    &meta.session_id[..8]
+                ).yellow()
+            );
+            t.create()?;
+        }
         let entries = t.read_all()
             .with_context(|| format!("failed to read transcript for session {}", &meta.session_id[..8]))?;
+        if transcript_path.exists() && entries.is_empty() && std::fs::metadata(&transcript_path).map(|m| m.len() > 0).unwrap_or(false) {
+            eprintln!(
+                "{}",
+                format!(
+                    "  warning: transcript for session {} appears corrupt — starting with empty history",
+                    &meta.session_id[..8]
+                ).yellow()
+            );
+        }
         (meta, t, entries, true)
     } else {
         // New session
@@ -143,6 +181,16 @@ async fn main() -> Result<()> {
         t.create()?;
         meta.save(&sessions_dir)?;
         (meta, t, Vec::new(), false)
+    };
+
+    // Resolve model for this session: on resume, prefer saved model unless user explicitly overrode
+    let model = if resumed && !user_specified_model {
+        session_meta.model.clone()
+    } else {
+        if resumed && session_meta.model != model {
+            session_meta.model = model.clone();
+        }
+        model
     };
 
     println!("{}", "grox — agentic coding with Grok".bold());
@@ -341,13 +389,18 @@ async fn main() -> Result<()> {
                     println!("  {}", "recent sessions:".bold());
                     for (i, s) in sessions.iter().take(10).enumerate() {
                         let active = if s.session_id == session_meta.session_id { " (current)" } else { "" };
+                        let summary_part = if s.summary.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" — {}", s.summary)
+                        };
                         println!(
-                            "  {}. {} — {} — {} in / {} out{}",
+                            "  {}. {} — {} — {}{}{}",
                             i + 1,
                             &s.session_id[..8].cyan(),
                             s.last_active.format("%Y-%m-%d %H:%M").to_string().dimmed(),
-                            s.cumulative_input_tokens,
-                            s.cumulative_output_tokens,
+                            s.model.dimmed(),
+                            summary_part.dimmed(),
                             active.green(),
                         );
                     }
@@ -390,6 +443,17 @@ async fn main() -> Result<()> {
                         println!("{}", "  already in this session".dimmed());
                         continue;
                     }
+                    // Warn about cross-project resume
+                    let current_project = project_root.display().to_string();
+                    if target.project_root != current_project {
+                        println!(
+                            "{}",
+                            format!(
+                                "  warning: session was created in '{}', tools will operate on '{}'",
+                                target.project_root, current_project
+                            ).yellow()
+                        );
+                    }
                     let t = Transcript::new(SessionMeta::transcript_path(&sessions_dir, &target.session_id));
                     match t.read_all() {
                         Ok(entries) => {
@@ -400,6 +464,14 @@ async fn main() -> Result<()> {
                             transcript = Transcript::new(
                                 SessionMeta::transcript_path(&sessions_dir, &session_meta.session_id),
                             );
+                            // Restore saved model unless user explicitly set one
+                            if session_meta.model != client.model() {
+                                client.set_model(session_meta.model.clone());
+                                println!(
+                                    "  model switched to {} (from resumed session)",
+                                    session_meta.model.cyan()
+                                );
+                            }
                             println!(
                                 "  {} session {} — {} user turns, {} assistant responses",
                                 "resumed".green(),
@@ -496,6 +568,10 @@ async fn main() -> Result<()> {
         let user_entry = TranscriptEntry::user_message(&input);
         history.push(user_entry.clone());
         transcript.append(&user_entry)?;
+
+        // Update last_active on every turn (not just successful API calls)
+        session_meta.last_active = Utc::now();
+        let _ = session_meta.save(&sessions_dir);
 
         // Preflight budget check: compact if estimated tokens exceed threshold
         if let Some(result) = compaction::maybe_compact(&history, &assembler, client.model(), &project_root, &client).await {

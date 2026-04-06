@@ -165,6 +165,7 @@ impl Transcript {
         Ok(())
     }
 
+    #[allow(dead_code)] // Utility for tests and potential future callers
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -331,6 +332,7 @@ impl SessionMeta {
     }
 
     /// Load session metadata from disk.
+    #[allow(dead_code)] // Used in tests; SessionIndex::list() is preferred for resume flows
     pub fn load(sessions_dir: &Path, session_id: &str) -> Result<Self> {
         let path = Self::meta_path(sessions_dir, session_id);
         let content = std::fs::read_to_string(&path)
