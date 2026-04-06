@@ -228,19 +228,30 @@ impl SessionPermissions {
         self.always_granted_dirs.insert(dir);
     }
 
-    fn is_inside_project(&self, path: &str) -> bool {
+    /// Resolve a path argument against the project root (relative paths are
+    /// joined to project_root; absolute paths are used as-is).
+    fn resolve_path(&self, path: &str) -> PathBuf {
         let p = Path::new(path);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            self.project_root.join(p)
+        }
+    }
+
+    fn is_inside_project(&self, path: &str) -> bool {
+        let resolved = self.resolve_path(path);
         // Try to validate — if it resolves inside project root, it's inside
-        util::validate_path(p, &self.project_root).is_ok()
+        util::validate_path(&resolved, &self.project_root).is_ok()
     }
 
     fn target_dir(&self, arguments: &str) -> Option<PathBuf> {
-        // For writes: parent directory of the target path
+        // For writes: parent directory of the target path (resolved against project root)
         // For shell: the cwd (defaults to project root)
         let parsed: serde_json::Value = serde_json::from_str(arguments).ok()?;
         if let Some(path) = parsed.get("path").and_then(|v| v.as_str()) {
-            let p = Path::new(path);
-            return p.parent().map(PathBuf::from);
+            let resolved = self.resolve_path(path);
+            return resolved.parent().map(PathBuf::from);
         }
         if let Some(cwd) = parsed.get("cwd").and_then(|v| v.as_str()) {
             return Some(PathBuf::from(cwd));
@@ -455,6 +466,34 @@ mod tests {
         // File in subdir: still prompts (different dir)
         let args_sub = format!(r#"{{"path":"{}"}}"#, sub.join("file.txt").display());
         assert!(matches!(p.check("file_write", &args_sub), PermissionCheck::Prompt { .. }));
+    }
+
+    // --- relative path classification ---
+
+    #[test]
+    fn relative_path_classified_as_in_project() {
+        let dir = tempdir().unwrap();
+        // Create the file so canonicalization works
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "").unwrap();
+
+        let p = perms_with_root(PermissionMode::Trust, dir.path().to_path_buf());
+        let args = r#"{"path":"src/lib.rs","content":"hello"}"#;
+        assert_eq!(p.classify_tool("file_write", args), ToolCategory::WriteInProject);
+        // Trust mode should auto-approve this
+        assert_eq!(p.check("file_write", args), PermissionCheck::Allow);
+    }
+
+    #[test]
+    fn relative_path_edit_classified_as_in_project() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "old").unwrap();
+
+        let p = perms_with_root(PermissionMode::Trust, dir.path().to_path_buf());
+        let args = r#"{"path":"src/lib.rs","old_string":"old","new_string":"new"}"#;
+        assert_eq!(p.classify_tool("file_edit", args), ToolCategory::WriteInProject);
+        assert_eq!(p.check("file_edit", args), PermissionCheck::Allow);
     }
 
     // --- file_edit permission tests ---

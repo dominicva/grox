@@ -2,6 +2,15 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+
+/// Fsync a directory to ensure rename durability on crash.
+fn sync_directory(dir: &Path) -> Result<()> {
+    let f = std::fs::File::open(dir)
+        .with_context(|| format!("Failed to open directory for sync: {}", dir.display()))?;
+    f.sync_all()
+        .with_context(|| format!("Failed to sync directory: {}", dir.display()))?;
+    Ok(())
+}
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -202,6 +211,11 @@ impl Transcript {
         std::fs::rename(&tmp_path, &self.path)
             .with_context(|| format!("Failed to rename temp file to: {}", self.path.display()))?;
 
+        // Fsync the parent directory to ensure the rename is durable
+        if let Some(parent) = self.path.parent() {
+            sync_directory(parent)?;
+        }
+
         Ok(())
     }
 }
@@ -274,6 +288,9 @@ impl SessionMeta {
 
         std::fs::rename(&tmp_path, &path)
             .with_context(|| format!("Failed to rename temp file to: {}", path.display()))?;
+
+        // Fsync the parent directory to ensure the rename is durable
+        sync_directory(sessions_dir)?;
 
         Ok(())
     }

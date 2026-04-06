@@ -20,15 +20,24 @@ fn resolve_tool_path(path: &str, project_root: &Path) -> PathBuf {
 
 /// Count occurrences of `needle` in `haystack`, including overlapping matches.
 /// For example, "aa" in "aaa" returns 2 (positions 0 and 1).
+/// Advances by one character (not one byte) to safely handle multibyte UTF-8.
 fn count_occurrences(haystack: &str, needle: &str) -> usize {
     if needle.is_empty() {
         return 0;
     }
     let mut count = 0;
     let mut start = 0;
-    while let Some(pos) = haystack[start..].find(needle) {
-        count += 1;
-        start += pos + 1; // advance by 1 byte to detect overlaps
+    while start + needle.len() <= haystack.len() {
+        if let Some(pos) = haystack[start..].find(needle) {
+            count += 1;
+            // Advance past the start of this match by one character, not one byte,
+            // to avoid slicing inside a multibyte character.
+            let match_start = start + pos;
+            let next = match_start + haystack[match_start..].chars().next().map_or(1, |c| c.len_utf8());
+            start = next;
+        } else {
+            break;
+        }
     }
     count
 }
@@ -950,6 +959,37 @@ mod tests {
     #[test]
     fn count_occurrences_empty_needle() {
         assert_eq!(count_occurrences("hello", ""), 0);
+    }
+
+    #[test]
+    fn count_occurrences_multibyte_no_panic() {
+        // "é" is 2 bytes in UTF-8. "éé" contains overlapping "é" twice.
+        assert_eq!(count_occurrences("éé", "é"), 2);
+        // "ée" should have 1 "é"
+        assert_eq!(count_occurrences("ée", "é"), 1);
+    }
+
+    #[test]
+    fn count_occurrences_multibyte_overlapping() {
+        // "ééé" with needle "éé" — overlapping matches at positions 0 and 1 (char-wise)
+        assert_eq!(count_occurrences("ééé", "éé"), 2);
+    }
+
+    #[tokio::test]
+    async fn file_edit_multibyte_content_no_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("utf8.txt");
+        std::fs::write(&file_path, "café résumé").unwrap();
+
+        let args = json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "café",
+            "new_string": "coffee"
+        }).to_string();
+
+        let result = Tool::FileEdit.execute(&args, dir.path()).await.unwrap();
+        assert!(result.contains("Edited"));
+        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "coffee résumé");
     }
 
     // --- list_files tests ---
