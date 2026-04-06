@@ -202,16 +202,14 @@ impl GrokApi for GrokClient {
                     }
                     // Response completed — extract usage
                     "response.completed" => {
-                        if let Some(resp) = parsed.get("response") {
-                            if let Some(u) = resp.get("usage") {
-                                let input_tokens = u.get("input_tokens")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0);
-                                let output_tokens = u.get("output_tokens")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0);
-                                usage = Some(Usage { input_tokens, output_tokens });
-                            }
+                        if let Some(u) = parsed.get("response").and_then(|r| r.get("usage")) {
+                            let input_tokens = u.get("input_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            let output_tokens = u.get("output_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            usage = Some(Usage { input_tokens, output_tokens });
                         }
                     }
                     _ => {}

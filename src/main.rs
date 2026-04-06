@@ -293,10 +293,10 @@ async fn main() -> Result<()> {
                 for entry in &result.entries {
                     transcript.append(entry)?;
                     // Check if any tool call was mutating (file_write, file_edit, shell_exec)
-                    if let TranscriptEntry::ToolCall { name, .. } = entry {
-                        if name == "file_write" || name == "file_edit" || name == "shell_exec" {
-                            had_mutating_tool = true;
-                        }
+                    if let TranscriptEntry::ToolCall { name, .. } = entry
+                        && (name == "file_write" || name == "file_edit" || name == "shell_exec")
+                    {
+                        had_mutating_tool = true;
                     }
                 }
                 history.extend(result.entries);

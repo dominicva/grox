@@ -57,6 +57,7 @@ pub enum TranscriptEntry {
 }
 
 impl TranscriptEntry {
+    #[allow(dead_code)] // Used in Phase 5 (compaction)
     pub fn token_estimate(&self) -> usize {
         match self {
             Self::UserMessage { token_estimate, .. }
@@ -101,6 +102,7 @@ impl TranscriptEntry {
     }
 
     /// Create a CompactionSummary with auto-calculated token estimate.
+    #[allow(dead_code)] // Used in Phase 6 (LLM compaction)
     pub fn compaction_summary(summary: impl Into<String>) -> Self {
         let summary = summary.into();
         let token_estimate = summary.len() / 4;
@@ -108,6 +110,7 @@ impl TranscriptEntry {
     }
 
     /// Create a SystemEvent with auto-calculated token estimate.
+    #[allow(dead_code)] // Used in Phase 7 (rewind checkpoints)
     pub fn system_event(event: impl Into<String>) -> Self {
         let event = event.into();
         let token_estimate = event.len() / 4;
@@ -160,6 +163,7 @@ impl Transcript {
     /// Read all entries from the transcript file.
     /// Crash recovery: trailing incomplete JSON line is silently discarded.
     /// Empty or missing file returns an empty vec.
+    #[allow(dead_code)] // Used in Phase 8 (session resume)
     pub fn read_all(&self) -> Result<Vec<TranscriptEntry>> {
         if !self.path.exists() {
             return Ok(Vec::new());
@@ -191,6 +195,7 @@ impl Transcript {
 
     /// Atomically rewrite the transcript with a new set of entries.
     /// Writes to a temp file first, then renames over the original.
+    #[allow(dead_code)] // Used in Phase 5 (compaction) and Phase 7 (rewind)
     pub fn atomic_rewrite(&self, entries: &[TranscriptEntry]) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)
@@ -297,6 +302,7 @@ impl SessionMeta {
     }
 
     /// Load session metadata from disk.
+    #[allow(dead_code)] // Used in Phase 8 (session resume)
     pub fn load(sessions_dir: &Path, session_id: &str) -> Result<Self> {
         let path = Self::meta_path(sessions_dir, session_id);
         let content = std::fs::read_to_string(&path)
@@ -325,6 +331,7 @@ impl SessionIndex {
 
     /// List all sessions, sorted by last_active (most recent first).
     /// Creates the sessions directory if it doesn't exist.
+    #[allow(dead_code)] // Used in Phase 8 (session resume)
     pub fn list(sessions_dir: &Path) -> Result<Vec<SessionMeta>> {
         std::fs::create_dir_all(sessions_dir)
             .with_context(|| format!("Failed to create sessions dir: {}", sessions_dir.display()))?;
@@ -355,6 +362,7 @@ impl SessionIndex {
     }
 
     /// List sessions filtered to a specific project root.
+    #[allow(dead_code)] // Used in Phase 8 (session resume)
     pub fn list_for_project(sessions_dir: &Path, project_root: &str) -> Result<Vec<SessionMeta>> {
         let all = Self::list(sessions_dir)?;
         Ok(all.into_iter().filter(|s| s.project_root == project_root).collect())
