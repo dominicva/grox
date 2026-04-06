@@ -14,6 +14,8 @@ pub struct RewindResult {
     pub had_shell_exec: bool,
     /// Number of transcript entries removed.
     pub entries_removed: usize,
+    /// Whether we're outside a git repo (code changes can't be restored).
+    pub not_in_git: bool,
 }
 
 /// Mode for rewind operations.
@@ -75,8 +77,16 @@ pub fn undo_last_turn(
     let mut file_results = Vec::new();
     let mut had_shell_exec = false;
 
+    // Track whether we're outside a git repo (for warning)
+    let not_in_git = !checkpoint::is_git_repo(project_root);
+
     // Restore files if mode includes code
     if mode != RewindMode::ConversationOnly {
+        if mode == RewindMode::CodeOnly && not_in_git {
+            return Err(
+                "not in a git repo — cannot restore code changes".to_string(),
+            );
+        }
         if let Some(cp_idx) = checkpoint_idx {
             // Only restore if the checkpoint is within the entries being removed
             if cp_idx >= truncate_to {
@@ -92,11 +102,6 @@ pub fn undo_last_turn(
                     }
                 }
             }
-        } else if !checkpoint::is_git_repo(project_root) {
-            return Err(
-                "not in a git repo — can only undo conversation (use /undo --conversation)"
-                    .to_string(),
-            );
         }
     }
 
@@ -114,6 +119,7 @@ pub fn undo_last_turn(
         file_results,
         had_shell_exec,
         entries_removed,
+        not_in_git,
     })
 }
 
@@ -191,10 +197,12 @@ pub fn rewind_to_turn(
         file_results,
         had_shell_exec,
         entries_removed,
+        not_in_git: false, // rewind_to_turn doesn't currently check, but could be added
     })
 }
 
 /// Count the number of user message turns in the transcript.
+#[allow(dead_code)] // Used in tests and available for UI display
 pub fn count_turns(entries: &[TranscriptEntry]) -> usize {
     entries
         .iter()
@@ -225,6 +233,12 @@ pub fn format_rewind_result(result: &RewindResult) -> String {
                 lines.push(format!("  FAILED: {} — {}", short_path(path), reason));
             }
         }
+    }
+
+    if result.not_in_git {
+        lines.push(
+            "  warning: not in a git repo — code changes cannot be restored".to_string(),
+        );
     }
 
     if result.had_shell_exec {
@@ -513,6 +527,7 @@ mod tests {
             file_results: vec![],
             had_shell_exec: false,
             entries_removed: 0,
+            not_in_git: false,
         };
         assert_eq!(format_rewind_result(&result), "  nothing to undo");
     }
@@ -524,10 +539,80 @@ mod tests {
             file_results: vec![],
             had_shell_exec: true,
             entries_removed: 3,
+            not_in_git: false,
         };
         let formatted = format_rewind_result(&result);
         assert!(formatted.contains("shell_exec"));
         assert!(formatted.contains("3 transcript entries"));
+    }
+
+    // --- non-git repo ---
+
+    #[test]
+    fn undo_non_git_conversation_only_works() {
+        let dir = tempfile::tempdir().unwrap(); // not a git repo
+        let mut entries = Vec::new();
+        entries.extend(simple_turn("q1", "a1"));
+        entries.extend(simple_turn("q2", "a2"));
+
+        let result =
+            undo_last_turn(&entries, dir.path(), RewindMode::ConversationOnly).unwrap();
+        assert_eq!(result.entries.len(), 2);
+        assert_eq!(result.entries_removed, 2);
+    }
+
+    #[test]
+    fn undo_non_git_both_mode_graceful() {
+        // In non-git repo with Both mode: should still undo conversation,
+        // just can't restore code (sets not_in_git flag)
+        let dir = tempfile::tempdir().unwrap();
+        let mut entries = Vec::new();
+        entries.extend(simple_turn("q1", "a1"));
+        entries.extend(simple_turn("q2", "a2"));
+
+        let result = undo_last_turn(&entries, dir.path(), RewindMode::Both).unwrap();
+        assert_eq!(result.entries.len(), 2);
+        assert!(result.not_in_git);
+    }
+
+    #[test]
+    fn undo_non_git_code_only_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let entries = simple_turn("q1", "a1");
+
+        let result = undo_last_turn(&entries, dir.path(), RewindMode::CodeOnly);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not in a git repo"));
+    }
+
+    // --- no checkpoints ---
+
+    #[test]
+    fn undo_no_checkpoint_conversation_still_works() {
+        // Turns without file modifications have no checkpoint entry
+        let repo = setup_git_repo();
+        let mut entries = Vec::new();
+        entries.extend(simple_turn("q1", "a1"));
+        entries.extend(simple_turn("q2", "a2"));
+
+        let result = undo_last_turn(&entries, repo.path(), RewindMode::Both).unwrap();
+        assert_eq!(result.entries.len(), 2);
+        assert!(result.file_results.is_empty()); // no files to restore
+    }
+
+    // --- format with not_in_git warning ---
+
+    #[test]
+    fn format_with_not_in_git_warning() {
+        let result = RewindResult {
+            entries: vec![],
+            file_results: vec![],
+            had_shell_exec: false,
+            entries_removed: 2,
+            not_in_git: true,
+        };
+        let formatted = format_rewind_result(&result);
+        assert!(formatted.contains("not in a git repo"));
     }
 
     // --- short_path ---
