@@ -2,6 +2,12 @@
 name = "grox"
 version = "0.1.0"
 edition = "2024"
+description = "Agentic coding with Grok"
+license = "MIT"
+repository = "https://github.com/dominicva/grox"
+keywords = ["grok", "xai", "agent", "coding", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = ["docs/", "PLAN.md", "TODOS.md"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
