@@ -59,22 +59,46 @@ pub struct CompactionResult {
 
 /// Check whether compaction should fire and, if so, run it.
 ///
+/// Runs heuristic compaction first (no LLM call). If the result is still
+/// above the compaction threshold, escalates to LLM-based summarization.
+///
 /// Returns `Some(CompactionResult)` with the compacted entries if compaction
 /// fired and produced changes. Returns `None` if the estimate is below the
 /// threshold or if compaction had no effect.
-pub fn maybe_compact(
+pub async fn maybe_compact(
     history: &[TranscriptEntry],
     assembler: &ContextAssembler,
     model: &str,
     project_root: &Path,
+    api: &dyn GrokApi,
 ) -> Option<CompactionResult> {
     let profile = ModelProfile::for_model(model);
     let estimated = assembler.estimate_tokens(history);
     if estimated <= profile.compaction_threshold() {
         return None;
     }
-    let result = heuristic_compact(history, project_root);
-    if result.compacted { Some(result) } else { None }
+
+    // Layer 1: heuristic compaction
+    let heuristic_result = heuristic_compact(history, project_root);
+
+    // Check if heuristic was sufficient
+    let after_heuristic = assembler.estimate_tokens(&heuristic_result.entries);
+    if after_heuristic <= profile.compaction_threshold() {
+        return if heuristic_result.compacted { Some(heuristic_result) } else { None };
+    }
+
+    // Layer 2: LLM compaction on the heuristic-compacted entries
+    match llm_compact(&heuristic_result.entries, model, api).await {
+        Ok(llm_result) if llm_result.compacted => Some(llm_result),
+        Ok(_) => {
+            // LLM compaction didn't help — return heuristic result if it did anything
+            if heuristic_result.compacted { Some(heuristic_result) } else { None }
+        }
+        Err(e) => {
+            eprintln!("  warning: LLM compaction failed: {e}");
+            if heuristic_result.compacted { Some(heuristic_result) } else { None }
+        }
+    }
 }
 
 /// Run heuristic compaction on transcript entries (no LLM call).
@@ -1041,23 +1065,26 @@ mod tests {
     // maybe_compact: preflight decision logic
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn maybe_compact_returns_none_below_threshold() {
+    #[tokio::test]
+    async fn maybe_compact_returns_none_below_threshold() {
+        use crate::api::mock::MockGrokApi;
         use serde_json::json;
 
         let assembler = ContextAssembler::new(json!({"role": "system", "content": "short"}));
+        let mock = MockGrokApi::new(vec![]);
         // Small transcript — well below any threshold
         let mut entries: Vec<TranscriptEntry> = Vec::new();
         for i in 0..6 {
             entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
         }
 
-        let result = maybe_compact(&entries, &assembler, "grok-3", Path::new("/project"));
+        let result = maybe_compact(&entries, &assembler, "grok-3", Path::new("/project"), &mock).await;
         assert!(result.is_none(), "should not compact when below threshold");
     }
 
-    #[test]
-    fn maybe_compact_returns_some_above_threshold() {
+    #[tokio::test]
+    async fn maybe_compact_returns_some_above_threshold() {
+        use crate::api::mock::MockGrokApi;
         use serde_json::json;
 
         let assembler = ContextAssembler::new(json!({"role": "system", "content": "short"}));
@@ -1080,7 +1107,9 @@ mod tests {
         let before_estimate = assembler.estimate_tokens(&entries);
         assert!(before_estimate > threshold, "setup: should exceed threshold");
 
-        let result = maybe_compact(&entries, &assembler, "grok-3", Path::new("/project"));
+        // Heuristic alone should handle this (big file_read → placeholder)
+        let mock = MockGrokApi::new(vec![]);
+        let result = maybe_compact(&entries, &assembler, "grok-3", Path::new("/project"), &mock).await;
         assert!(result.is_some(), "should compact when above threshold");
 
         let compacted = result.unwrap();
@@ -1088,14 +1117,16 @@ mod tests {
         assert!(after_estimate < before_estimate, "compaction should reduce estimate");
     }
 
-    #[test]
-    fn maybe_compact_returns_none_when_above_threshold_but_nothing_to_compact() {
+    #[tokio::test]
+    async fn maybe_compact_returns_none_when_above_threshold_but_nothing_to_compact() {
+        use crate::api::mock::MockGrokApi;
         use serde_json::json;
 
         // Use a system prompt large enough to push us over the threshold on its own
         let threshold = ModelProfile::for_model("grok-3").compaction_threshold();
         let big_system = "x".repeat(threshold * 4 + 1000);
         let assembler = ContextAssembler::new(json!({"role": "system", "content": big_system}));
+        let mock = MockGrokApi::new(vec![]);
 
         // Only 3 turns — everything is recent, nothing to compact
         let mut entries: Vec<TranscriptEntry> = Vec::new();
@@ -1106,8 +1137,47 @@ mod tests {
         let estimate = assembler.estimate_tokens(&entries);
         assert!(estimate > threshold, "setup: system overhead should exceed threshold");
 
-        let result = maybe_compact(&entries, &assembler, "grok-3", Path::new("/project"));
+        let result = maybe_compact(&entries, &assembler, "grok-3", Path::new("/project"), &mock).await;
         assert!(result.is_none(), "should return None when above threshold but nothing compactable");
+    }
+
+    #[tokio::test]
+    async fn maybe_compact_escalates_to_llm_when_heuristic_insufficient() {
+        use crate::api::TurnResponse;
+        use crate::api::mock::MockGrokApi;
+        use serde_json::json;
+
+        let threshold = ModelProfile::for_model("grok-3").compaction_threshold();
+
+        // Use a large system prompt so we're over threshold even after heuristic
+        // compaction. The heuristic can only compact tool results — user/assistant
+        // messages are untouched. So big user messages stay big.
+        let big_msg = "x".repeat(threshold * 2); // big enough to stay over threshold
+        let assembler = ContextAssembler::new(json!({"role": "system", "content": "short"}));
+
+        let mock = MockGrokApi::new(vec![TurnResponse {
+            text: "LLM summary of conversation.".into(),
+            tool_calls: vec![],
+            usage: Some(crate::api::Usage { input_tokens: 2000, output_tokens: 500 }),
+        }]);
+
+        // Build transcript with big user messages that heuristic can't compact
+        let mut entries = vec![
+            TranscriptEntry::user_message(&big_msg),
+            TranscriptEntry::assistant_message(&big_msg),
+        ];
+        for i in 1..=5 {
+            entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
+        }
+
+        let result = maybe_compact(&entries, &assembler, "grok-3", Path::new("/project"), &mock).await;
+        assert!(result.is_some(), "should compact via LLM");
+
+        let compacted = result.unwrap();
+        // Should have LLM usage since it escalated
+        assert!(compacted.llm_usage.is_some(), "should have LLM usage");
+        // First entry should be a CompactionSummary
+        assert!(matches!(&compacted.entries[0], TranscriptEntry::CompactionSummary { .. }));
     }
 
     // -----------------------------------------------------------------------

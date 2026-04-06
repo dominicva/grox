@@ -212,22 +212,45 @@ async fn main() -> Result<()> {
         }
 
         if input == "/compact" {
-            let result = compaction::heuristic_compact(&history, &project_root);
+            let old_estimate = assembler.estimate_tokens(&history);
+            let old_count = history.len();
+
+            // Try heuristic first
+            let heuristic = compaction::heuristic_compact(&history, &project_root);
+            let after_heuristic = assembler.estimate_tokens(&heuristic.entries);
+            let threshold = model_profile::ModelProfile::for_model(client.model()).compaction_threshold();
+
+            // If heuristic wasn't enough, escalate to LLM compaction
+            let result = if heuristic.compacted && after_heuristic > threshold {
+                match compaction::llm_compact(&heuristic.entries, client.model(), &client).await {
+                    Ok(llm_result) if llm_result.compacted => llm_result,
+                    Ok(_) => heuristic,
+                    Err(e) => {
+                        eprintln!("{}", format!("  warning: LLM compaction failed: {e}").yellow());
+                        heuristic
+                    }
+                }
+            } else {
+                heuristic
+            };
+
             if result.compacted {
-                let old_estimate = assembler.estimate_tokens(&history);
                 let new_estimate = assembler.estimate_tokens(&result.entries);
-                let old_count = history.len();
                 let new_count = result.entries.len();
+                let llm_cost = result.llm_usage.as_ref().and_then(|u| {
+                    let profile = model_profile::ModelProfile::for_model(client.model());
+                    profile.estimate_cost(u.input_tokens, u.output_tokens)
+                });
                 history = result.entries;
                 transcript.atomic_rewrite(&history)?;
-                println!(
-                    "{}",
-                    format!(
-                        "  compacted: {} entries → {} entries, ~{} → ~{} tokens",
-                        old_count, new_count, old_estimate, new_estimate
-                    )
-                    .yellow()
+                let mut msg = format!(
+                    "  compacted: {} entries → {} entries, ~{} → ~{} tokens",
+                    old_count, new_count, old_estimate, new_estimate
                 );
+                if let Some(cost) = llm_cost {
+                    msg.push_str(&format!(" (LLM summarization: ~${cost:.4})"));
+                }
+                println!("{}", msg.yellow());
             } else {
                 println!("{}", "  nothing to compact".dimmed());
             }
@@ -242,19 +265,23 @@ async fn main() -> Result<()> {
         transcript.append(&user_entry)?;
 
         // Preflight budget check: compact if estimated tokens exceed threshold
-        if let Some(result) = compaction::maybe_compact(&history, &assembler, client.model(), &project_root) {
+        if let Some(result) = compaction::maybe_compact(&history, &assembler, client.model(), &project_root, &client).await {
             let old_estimate = assembler.estimate_tokens(&history);
             let new_estimate = assembler.estimate_tokens(&result.entries);
             let threshold = model_profile::ModelProfile::for_model(client.model()).compaction_threshold();
+            let llm_cost = result.llm_usage.as_ref().and_then(|u| {
+                let profile = model_profile::ModelProfile::for_model(client.model());
+                profile.estimate_cost(u.input_tokens, u.output_tokens)
+            });
             history = result.entries;
             transcript.atomic_rewrite(&history)?;
-            eprintln!(
-                "{}",
-                format!(
-                    "  auto-compacted: ~{old_estimate} → ~{new_estimate} tokens (threshold: {threshold})",
-                )
-                .yellow()
+            let mut msg = format!(
+                "  auto-compacted: ~{old_estimate} → ~{new_estimate} tokens (threshold: {threshold})",
             );
+            if let Some(cost) = llm_cost {
+                msg.push_str(&format!(" [LLM summarization: ~${cost:.4}]"));
+            }
+            eprintln!("{}", msg.yellow());
         }
 
         // Build full message array from history
