@@ -653,6 +653,12 @@ async fn main() -> Result<()> {
                                 );
                             }
                         }
+                    } else if name == "file_edit" {
+                        // Show the surrounding context so the user sees what changed
+                        println!("{}", format!("  {}", "✓".green()).dimmed());
+                        for line in output.lines() {
+                            println!("  {}", line.dimmed());
+                        }
                     } else if output.is_empty() {
                         println!("{}", format!("  {} (empty)", "✓".green()).dimmed());
                     } else {
