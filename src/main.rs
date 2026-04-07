@@ -24,6 +24,10 @@ use rustyline::DefaultEditor;
 use session::{SessionIndex, SessionMeta, Transcript, TranscriptEntry};
 use serde_json::json;
 use std::io::{Write, stdout};
+use syntect::easy::HighlightLines;
+use syntect::highlighting::ThemeSet;
+use syntect::parsing::SyntaxSet;
+use syntect::util::as_24_bit_terminal_escaped;
 
 #[derive(Parser)]
 #[command(name = "grox", about = "Agentic coding with Grok")]
@@ -654,11 +658,11 @@ async fn main() -> Result<()> {
                             }
                         }
                     } else if name == "file_edit" {
-                        // Show the surrounding context so the user sees what changed
+                        // Show the surrounding context with syntax highlighting
                         println!("{}", format!("  {}", "✓".green()).dimmed());
-                        for line in output.lines() {
-                            println!("  {}", line.dimmed());
-                        }
+                        println!();
+                        format_edit_context(output);
+                        println!();
                     } else if output.is_empty() {
                         println!("{}", format!("  {} (empty)", "✓".green()).dimmed());
                     } else {
@@ -748,6 +752,61 @@ fn estimate_cost(model: &str, usage: &api::Usage) -> String {
     match profile.estimate_cost(usage.input_tokens, usage.output_tokens) {
         Some(cost) => format!("  (~${cost:.4})"),
         None => String::new(),
+    }
+}
+
+/// Format file_edit output with syntax highlighting and spacing.
+///
+/// Input format: "Edited path/to/file.ext\n\n   1 | code\n   2 | code\n..."
+fn format_edit_context(output: &str) {
+    let mut lines = output.lines();
+
+    // First line is "Edited <path>" — extract filename for syntax detection
+    let header = lines.next().unwrap_or("");
+    let filename = header.strip_prefix("Edited ").unwrap_or("");
+    println!("  {}", header.dimmed());
+
+    // Skip the blank line separator
+    let _ = lines.next();
+
+    // Collect the context lines (formatted as "   N | code")
+    let context_lines: Vec<&str> = lines.collect();
+    if context_lines.is_empty() {
+        return;
+    }
+
+    // Try syntax highlighting; fall back to dimmed output
+    let ss = SyntaxSet::load_defaults_newlines();
+    let ts = ThemeSet::load_defaults();
+    let theme = &ts.themes["base16-ocean.dark"];
+
+    let syntax = ss
+        .find_syntax_for_file(filename)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| ss.find_syntax_plain_text());
+
+    let mut highlighter = HighlightLines::new(syntax, theme);
+
+    for line in &context_lines {
+        // Split "   N | code" into gutter and code portions
+        if let Some(pipe_pos) = line.find(" | ") {
+            let gutter = &line[..pipe_pos + 3]; // "   N | "
+            let code = &line[pipe_pos + 3..];
+
+            // Highlight the code portion
+            let code_with_nl = format!("{code}\n");
+            let regions = highlighter
+                .highlight_line(&code_with_nl, &ss)
+                .unwrap_or_default();
+            let highlighted = as_24_bit_terminal_escaped(&regions, false);
+
+            print!("  {}", gutter.dimmed());
+            print!("{highlighted}\x1b[0m");
+        } else {
+            // Lines without pipe (e.g. blank lines in output)
+            println!("  {}", line.dimmed());
+        }
     }
 }
 
