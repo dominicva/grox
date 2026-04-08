@@ -145,7 +145,7 @@ impl Tool {
             Tool::FileEdit => json!({
                 "type": "function",
                 "name": "file_edit",
-                "description": "Edit a file by replacing a single occurrence of a string. The old_string must match exactly one location in the file. If it matches zero or multiple locations, the edit fails with an error. Use this for surgical edits — include enough surrounding context in old_string to ensure a unique match.",
+                "description": "Edit a file by replacing occurrences of a string. By default, old_string must match exactly one location (use enough context to ensure uniqueness). Set replace_all to true to replace every occurrence.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -155,11 +155,15 @@ impl Tool {
                         },
                         "old_string": {
                             "type": "string",
-                            "description": "The exact string to find and replace (must match exactly once)"
+                            "description": "The exact string to find and replace"
                         },
                         "new_string": {
                             "type": "string",
                             "description": "The replacement string"
+                        },
+                        "replace_all": {
+                            "type": "boolean",
+                            "description": "Replace all occurrences (default: false, which requires exactly one match)"
                         }
                     },
                     "required": ["path", "old_string", "new_string"],
@@ -349,6 +353,8 @@ fn execute_file_edit(arguments: &str, project_root: &std::path::Path) -> Result<
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required parameter: new_string"))?;
 
+    let replace_all = args["replace_all"].as_bool().unwrap_or(false);
+
     if old_string.is_empty() {
         bail!("old_string must not be empty");
     }
@@ -371,33 +377,46 @@ fn execute_file_edit(arguments: &str, project_root: &std::path::Path) -> Result<
     let content = String::from_utf8(bytes)
         .map_err(|_| anyhow::anyhow!("File '{}' contains invalid UTF-8", path))?;
 
-    // Count occurrences with overlapping detection.
-    // str::matches is non-overlapping, so we scan manually to catch cases
-    // like old_string="aa" in "aaa" (positions 0 and 1).
-    let count = count_occurrences(&content, old_string);
+    if replace_all {
+        // Non-overlapping left-to-right count, consistent with str::replace semantics
+        let count = content.matches(old_string).count();
+        if count == 0 {
+            bail!("old_string not found in '{}'", path);
+        }
+        let new_content = content.replace(old_string, new_string);
+        std::fs::write(&resolved, &new_content)
+            .map_err(|e| anyhow::anyhow!("Failed to write file '{}': {}", path, e))?;
+        Ok(format!("Replaced {} occurrences in {}", count, path))
+    } else {
+        // Count occurrences with overlapping detection.
+        // str::matches is non-overlapping, so we scan manually to catch cases
+        // like old_string="aa" in "aaa" (positions 0 and 1).
+        let count = count_occurrences(&content, old_string);
 
-    if count == 0 {
-        bail!("old_string not found in '{}'", path);
+        if count == 0 {
+            bail!("old_string not found in '{}'", path);
+        }
+
+        if count > 1 {
+            bail!(
+                "old_string matches {} locations in '{}' — provide more context to match exactly once",
+                count,
+                path
+            );
+        }
+
+        let new_content = content.replacen(old_string, new_string, 1);
+        std::fs::write(&resolved, &new_content)
+            .map_err(|e| anyhow::anyhow!("Failed to write file '{}': {}", path, e))?;
+
+        // Return a few lines of surrounding context
+        let replacement_start = content.find(old_string).unwrap();
+        let byte_offset_in_new = replacement_start;
+        let context_snippet =
+            extract_edit_context(&new_content, byte_offset_in_new, new_string.len());
+
+        Ok(format!("Edited {}\n\n{}", path, context_snippet))
     }
-
-    if count > 1 {
-        bail!(
-            "old_string matches {} locations in '{}' — provide more context to match exactly once",
-            count,
-            path
-        );
-    }
-
-    let new_content = content.replacen(old_string, new_string, 1);
-    std::fs::write(&resolved, &new_content)
-        .map_err(|e| anyhow::anyhow!("Failed to write file '{}': {}", path, e))?;
-
-    // Return a few lines of surrounding context
-    let replacement_start = content.find(old_string).unwrap();
-    let byte_offset_in_new = replacement_start;
-    let context_snippet = extract_edit_context(&new_content, byte_offset_in_new, new_string.len());
-
-    Ok(format!("Edited {}\n\n{}", path, context_snippet))
 }
 
 /// Extract a few lines of context around the edited region.
@@ -1057,6 +1076,122 @@ mod tests {
     fn count_occurrences_multibyte_overlapping() {
         // "ééé" with needle "éé" — overlapping matches at positions 0 and 1 (char-wise)
         assert_eq!(count_occurrences("ééé", "éé"), 2);
+    }
+
+    // --- file_edit replace_all tests ---
+
+    #[tokio::test]
+    async fn file_edit_replace_all_replaces_all_occurrences() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "foo bar foo baz foo").unwrap();
+
+        let args = json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "foo",
+            "new_string": "qux",
+            "replace_all": true
+        })
+        .to_string();
+
+        let result = Tool::FileEdit.execute(&args, dir.path()).await;
+        assert!(result.success);
+        assert!(result.output.contains("Replaced 3 occurrences"));
+        assert_eq!(
+            std::fs::read_to_string(&file_path).unwrap(),
+            "qux bar qux baz qux"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_edit_replace_all_zero_matches_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "hello world").unwrap();
+
+        let args = json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "nonexistent",
+            "new_string": "replacement",
+            "replace_all": true
+        })
+        .to_string();
+
+        let result = Tool::FileEdit.execute(&args, dir.path()).await;
+        assert!(!result.success);
+        assert!(result.output.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn file_edit_replace_all_non_overlapping_semantics() {
+        // "aa" in "aaa" should yield one replacement (non-overlapping left-to-right)
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "aaa").unwrap();
+
+        let args = json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "aa",
+            "new_string": "X",
+            "replace_all": true
+        })
+        .to_string();
+
+        let result = Tool::FileEdit.execute(&args, dir.path()).await;
+        assert!(result.success);
+        assert!(
+            result.output.contains("Replaced 1 occurrences"),
+            "expected 1 replacement, got: {}",
+            result.output
+        );
+        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "Xa");
+    }
+
+    #[tokio::test]
+    async fn file_edit_replace_all_false_preserves_single_match_behavior() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "hello hello hello").unwrap();
+
+        // replace_all explicitly false — should fail like the default (multiple matches)
+        let args = json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "hello",
+            "new_string": "goodbye",
+            "replace_all": false
+        })
+        .to_string();
+
+        let result = Tool::FileEdit.execute(&args, dir.path()).await;
+        assert!(!result.success);
+        assert!(result.output.contains("3 locations"));
+        assert_eq!(
+            std::fs::read_to_string(&file_path).unwrap(),
+            "hello hello hello"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_edit_replace_all_single_occurrence() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "hello world").unwrap();
+
+        let args = json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "hello",
+            "new_string": "goodbye",
+            "replace_all": true
+        })
+        .to_string();
+
+        let result = Tool::FileEdit.execute(&args, dir.path()).await;
+        assert!(result.success);
+        assert!(result.output.contains("Replaced 1 occurrences"));
+        assert_eq!(
+            std::fs::read_to_string(&file_path).unwrap(),
+            "goodbye world"
+        );
     }
 
     #[tokio::test]
