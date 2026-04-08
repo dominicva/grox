@@ -252,7 +252,6 @@ pub struct RecordingRenderer {
     pub tool_results: Vec<(String, String)>,
     pub reasoning_calls: Vec<(Option<String>, Option<String>, Option<u64>)>,
     pub auth_warnings: Vec<String>,
-    pub thinking_expanded: bool,
 }
 
 #[cfg(test)]
@@ -264,7 +263,6 @@ impl RecordingRenderer {
             tool_results: Vec::new(),
             reasoning_calls: Vec::new(),
             auth_warnings: Vec::new(),
-            thinking_expanded: true,
         }
     }
 }

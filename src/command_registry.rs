@@ -167,10 +167,6 @@ pub struct GroxHelper {
 }
 
 impl GroxHelper {
-    pub fn new() -> Self {
-        Self { file_index: None }
-    }
-
     pub fn with_file_index(file_index: FileIndex) -> Self {
         Self {
             file_index: Some(file_index),
