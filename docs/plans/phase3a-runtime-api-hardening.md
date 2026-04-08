@@ -128,19 +128,19 @@ Wire up reasoning/thinking support end-to-end, driven by the active model's capa
 
 ### Acceptance criteria
 
-- [ ] `/think` cycles effort on models that support it; shows an explanatory message on models that don't
-- [ ] `--think` CLI flag sets initial reasoning effort
-- [ ] API requests include `reasoning: { effort }` when appropriate
-- [ ] Incompatible parameters are excluded for reasoning models
-- [ ] Plaintext `reasoning_content` is parsed and displayed from grok-3-mini responses
-- [ ] Encrypted reasoning is requested via `include` for grok-4 reasoning models
-- [ ] Encrypted reasoning is stored in the transcript and round-tripped in subsequent requests
-- [ ] `reasoning_tokens` are parsed from `usage.output_tokens_details.reasoning_tokens`
-- [ ] Cost calculation includes reasoning tokens at the output token rate
-- [ ] Old transcripts without reasoning fields load without error
-- [ ] Plaintext reasoning from grok-3-mini is round-tripped in subsequent API requests
-- [ ] Token estimation for assistant messages includes reasoning payload size
-- [ ] Encrypted reasoning displays `[thinking... N tokens]` indicator
+- [x] `/think` cycles effort on models that support it; shows an explanatory message on models that don't
+- [x] `--think` CLI flag sets initial reasoning effort
+- [x] API requests include `reasoning: { effort }` when appropriate
+- [x] Incompatible parameters are excluded for reasoning models
+- [x] Plaintext `reasoning_content` is parsed and displayed from grok-3-mini responses
+- [x] Encrypted reasoning is requested via `include` for grok-4 reasoning models
+- [x] Encrypted reasoning is stored in the transcript and round-tripped in subsequent requests
+- [x] `reasoning_tokens` are parsed from `usage.output_tokens_details.reasoning_tokens`
+- [x] Cost calculation includes reasoning tokens at the output token rate
+- [x] Old transcripts without reasoning fields load without error
+- [x] Plaintext reasoning from grok-3-mini is round-tripped in subsequent API requests
+- [x] Token estimation for assistant messages includes reasoning payload size
+- [x] Encrypted reasoning displays `[thinking... N tokens]` indicator
 
 ---
 
