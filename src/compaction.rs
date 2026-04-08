@@ -334,6 +334,16 @@ async fn chunked_summarize(
         (Some(u1), Some(u2)) => Some(crate::api::Usage {
             input_tokens: u1.input_tokens + u2.input_tokens,
             output_tokens: u1.output_tokens + u2.output_tokens,
+            cached_input_tokens: match (u1.cached_input_tokens, u2.cached_input_tokens) {
+                (Some(a), Some(b)) => Some(a + b),
+                (Some(a), None) | (None, Some(a)) => Some(a),
+                (None, None) => None,
+            },
+            reasoning_tokens: match (u1.reasoning_tokens, u2.reasoning_tokens) {
+                (Some(a), Some(b)) => Some(a + b),
+                (Some(a), None) | (None, Some(a)) => Some(a),
+                (None, None) => None,
+            },
         }),
         (Some(u), None) | (None, Some(u)) => Some(u),
         (None, None) => None,
@@ -1302,7 +1312,11 @@ mod tests {
             usage: Some(crate::api::Usage {
                 input_tokens: 2000,
                 output_tokens: 500,
+                cached_input_tokens: None,
+                reasoning_tokens: None,
             }),
+            reasoning_content: None,
+            encrypted_reasoning: None,
         }]);
 
         // Build transcript with big user messages that heuristic can't compact
@@ -1348,7 +1362,11 @@ mod tests {
             usage: Some(crate::api::Usage {
                 input_tokens: 5000,
                 output_tokens: 3000,
+                cached_input_tokens: None,
+                reasoning_tokens: None,
             }),
+            reasoning_content: None,
+            encrypted_reasoning: None,
         }]);
 
         let mut entries = vec![
@@ -1386,7 +1404,11 @@ mod tests {
             usage: Some(crate::api::Usage {
                 input_tokens: 500,
                 output_tokens: 200,
+                cached_input_tokens: None,
+                reasoning_tokens: None,
             }),
+            reasoning_content: None,
+            encrypted_reasoning: None,
         }]);
 
         let mut entries: Vec<TranscriptEntry> = Vec::new();
@@ -1422,7 +1444,11 @@ mod tests {
             usage: Some(crate::api::Usage {
                 input_tokens: 1000,
                 output_tokens: 300,
+                cached_input_tokens: None,
+                reasoning_tokens: None,
             }),
+            reasoning_content: None,
+            encrypted_reasoning: None,
         }]);
 
         let mut entries: Vec<TranscriptEntry> = Vec::new();
@@ -1462,6 +1488,8 @@ mod tests {
             text: summary_text.into(),
             tool_calls: vec![],
             usage: None,
+            reasoning_content: None,
+            encrypted_reasoning: None,
         }]);
 
         let mut entries: Vec<TranscriptEntry> = Vec::new();
@@ -1490,7 +1518,11 @@ mod tests {
             usage: Some(crate::api::Usage {
                 input_tokens: 500,
                 output_tokens: 5000,
+                cached_input_tokens: None,
+                reasoning_tokens: None,
             }),
+            reasoning_content: None,
+            encrypted_reasoning: None,
         }]);
 
         // Small old entries — summary will be bigger
@@ -1620,7 +1652,11 @@ mod tests {
                 usage: Some(crate::api::Usage {
                     input_tokens: 5000,
                     output_tokens: 500,
+                    cached_input_tokens: None,
+                    reasoning_tokens: None,
                 }),
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             // Second pass: combine with newer half
             TurnResponse {
@@ -1629,7 +1665,11 @@ mod tests {
                 usage: Some(crate::api::Usage {
                     input_tokens: 3000,
                     output_tokens: 400,
+                    cached_input_tokens: None,
+                    reasoning_tokens: None,
                 }),
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
         ]);
 
@@ -1677,7 +1717,11 @@ mod tests {
             usage: Some(crate::api::Usage {
                 input_tokens: 1000,
                 output_tokens: 200,
+                cached_input_tokens: None,
+                reasoning_tokens: None,
             }),
+            reasoning_content: None,
+            encrypted_reasoning: None,
         }]);
 
         // Entries with enough content so summary is smaller, but below 80% of context window

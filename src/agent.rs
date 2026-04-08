@@ -79,6 +79,17 @@ impl<'a> Agent<'a> {
                     Some(prev) => crate::api::Usage {
                         input_tokens: prev.input_tokens + u.input_tokens,
                         output_tokens: prev.output_tokens + u.output_tokens,
+                        cached_input_tokens: match (prev.cached_input_tokens, u.cached_input_tokens)
+                        {
+                            (Some(a), Some(b)) => Some(a + b),
+                            (Some(a), None) | (None, Some(a)) => Some(a),
+                            (None, None) => None,
+                        },
+                        reasoning_tokens: match (prev.reasoning_tokens, u.reasoning_tokens) {
+                            (Some(a), Some(b)) => Some(a + b),
+                            (Some(a), None) | (None, Some(a)) => Some(a),
+                            (None, None) => None,
+                        },
                     },
                     None => u.clone(),
                 });
@@ -274,11 +285,15 @@ mod tests {
                     arguments: format!(r#"{{"path": "{}"}}"#, path),
                 }],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             TurnResponse {
                 text: "The file contains a main function.".into(),
                 tool_calls: vec![],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
         ]);
 
@@ -312,11 +327,15 @@ mod tests {
                     arguments: r#"{"path": "/nonexistent/file.rs"}"#.into(),
                 }],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             TurnResponse {
                 text: "That file doesn't exist.".into(),
                 tool_calls: vec![],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
         ]);
 
@@ -345,6 +364,8 @@ mod tests {
             text: "Hello! How can I help?".into(),
             tool_calls: vec![],
             usage: None,
+            reasoning_content: None,
+            encrypted_reasoning: None,
         }]);
 
         let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
@@ -377,6 +398,8 @@ mod tests {
                     arguments: r#"{"path": "/dev/null"}"#.into(),
                 }],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             })
             .collect();
 
@@ -411,11 +434,15 @@ mod tests {
                     arguments: "{}".into(),
                 }],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             TurnResponse {
                 text: "I don't have that tool.".into(),
                 tool_calls: vec![],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
         ]);
 
@@ -449,11 +476,15 @@ mod tests {
                     arguments: r#"{"path": "/tmp/test.txt", "content": "hello"}"#.into(),
                 }],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             TurnResponse {
                 text: "Write was denied.".into(),
                 tool_calls: vec![],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
         ]);
 
@@ -486,6 +517,8 @@ mod tests {
             text: "Hello!".into(),
             tool_calls: vec![],
             usage: None,
+            reasoning_content: None,
+            encrypted_reasoning: None,
         }]);
 
         let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
@@ -531,11 +564,15 @@ mod tests {
                     arguments: format!(r#"{{"path": "{}"}}"#, path),
                 }],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             TurnResponse {
                 text: "The file says test content.".into(),
                 tool_calls: vec![],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
         ]);
 
@@ -577,6 +614,8 @@ mod tests {
             text: String::new(),
             tool_calls: vec![],
             usage: None,
+            reasoning_content: None,
+            encrypted_reasoning: None,
         }]);
 
         let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
@@ -615,7 +654,11 @@ mod tests {
                 usage: Some(crate::api::Usage {
                     input_tokens: 100,
                     output_tokens: 50,
+                    cached_input_tokens: None,
+                    reasoning_tokens: None,
                 }),
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             TurnResponse {
                 text: "Done.".into(),
@@ -623,7 +666,11 @@ mod tests {
                 usage: Some(crate::api::Usage {
                     input_tokens: 200,
                     output_tokens: 75,
+                    cached_input_tokens: None,
+                    reasoning_tokens: None,
                 }),
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
         ]);
 
@@ -667,11 +714,15 @@ mod tests {
                     ),
                 }],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             TurnResponse {
                 text: "Written.".into(),
                 tool_calls: vec![],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
         ]);
 
@@ -717,11 +768,15 @@ mod tests {
                     arguments: format!(r#"{{"path": "{}"}}"#, path),
                 }],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             TurnResponse {
                 text: "Read it.".into(),
                 tool_calls: vec![],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
         ]);
 
@@ -763,11 +818,15 @@ mod tests {
                     arguments: r#"{"path": "/tmp/x.txt", "content": "y"}"#.into(),
                 }],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             TurnResponse {
                 text: "Denied.".into(),
                 tool_calls: vec![],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
         ]);
 
@@ -838,11 +897,15 @@ mod tests {
                     ),
                 }],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             TurnResponse {
                 text: "Done.".into(),
                 tool_calls: vec![],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
         ]);
 
@@ -908,11 +971,15 @@ mod tests {
                     ),
                 }],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             TurnResponse {
                 text: "Edited.".into(),
                 tool_calls: vec![],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
         ]);
 
@@ -968,11 +1035,15 @@ mod tests {
                     arguments: format!(r#"{{"path": "{}"}}"#, file_path.display()),
                 }],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             TurnResponse {
                 text: "Read.".into(),
                 tool_calls: vec![],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
         ]);
 
@@ -1020,11 +1091,15 @@ mod tests {
                     ),
                 }],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             TurnResponse {
                 text: "Edit failed.".into(),
                 tool_calls: vec![],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
         ]);
 
@@ -1069,11 +1144,15 @@ mod tests {
                     arguments: format!(r#"{{"path": "{}", "content": "x"}}"#, file_path.display()),
                 }],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             TurnResponse {
                 text: "Denied.".into(),
                 tool_calls: vec![],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
         ]);
 
@@ -1124,11 +1203,15 @@ mod tests {
                     ),
                 }],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             TurnResponse {
                 text: "Done.".into(),
                 tool_calls: vec![],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
         ]);
 
@@ -1187,11 +1270,15 @@ mod tests {
                     },
                 ],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             TurnResponse {
                 text: "Edited twice.".into(),
                 tool_calls: vec![],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
         ]);
 
@@ -1275,11 +1362,15 @@ mod tests {
                     },
                 ],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             TurnResponse {
                 text: "Done.".into(),
                 tool_calls: vec![],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
         ]);
 
@@ -1341,11 +1432,15 @@ mod tests {
                     ),
                 }],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             TurnResponse {
                 text: "Created.".into(),
                 tool_calls: vec![],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
         ]);
 
@@ -1406,6 +1501,8 @@ mod tests {
                     arguments: r#"{"command": "echo hi"}"#.into(),
                 }],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             // Iteration 2: file_write
             TurnResponse {
@@ -1419,11 +1516,15 @@ mod tests {
                     ),
                 }],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             TurnResponse {
                 text: "Done.".into(),
                 tool_calls: vec![],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
         ]);
 
@@ -1485,6 +1586,8 @@ mod tests {
                     ),
                 }],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             // Iteration 2: shell_exec only
             TurnResponse {
@@ -1495,11 +1598,15 @@ mod tests {
                     arguments: r#"{"command": "echo side-effect"}"#.into(),
                 }],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             TurnResponse {
                 text: "Done.".into(),
                 tool_calls: vec![],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
         ]);
 
@@ -1584,11 +1691,15 @@ mod tests {
                     },
                 ],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             TurnResponse {
                 text: "Edited.".into(),
                 tool_calls: vec![],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
         ]);
 
@@ -1658,6 +1769,8 @@ mod tests {
                     ),
                 }],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             // No second response — send_turn will error
         ]);
@@ -1749,6 +1862,8 @@ mod tests {
                     arguments: format!(r#"{{"path": "{}"}}"#, path),
                 }],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             // Iteration 2: model requests another file_read
             TurnResponse {
@@ -1759,12 +1874,16 @@ mod tests {
                     arguments: format!(r#"{{"path": "{}"}}"#, path),
                 }],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
             // Iteration 3: model responds with text (no more tools)
             TurnResponse {
                 text: "All done.".into(),
                 tool_calls: vec![],
                 usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             },
         ]);
 

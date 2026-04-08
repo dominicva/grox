@@ -35,6 +35,12 @@ pub enum TranscriptEntry {
     AssistantMessage {
         content: String,
         token_estimate: usize,
+        /// Plaintext reasoning content (grok-3-mini). Absent in old transcripts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_content: Option<String>,
+        /// Encrypted/opaque reasoning blob (grok-4 reasoning models). Absent in old transcripts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_reasoning: Option<String>,
     },
     ToolCall {
         call_id: String,
@@ -93,6 +99,27 @@ impl TranscriptEntry {
         Self::AssistantMessage {
             content,
             token_estimate,
+            reasoning_content: None,
+            encrypted_reasoning: None,
+        }
+    }
+
+    /// Create an AssistantMessage with reasoning payloads.
+    /// Token estimate includes visible content plus reasoning payload size.
+    pub fn assistant_message_with_reasoning(
+        content: impl Into<String>,
+        reasoning_content: Option<String>,
+        encrypted_reasoning: Option<String>,
+    ) -> Self {
+        let content = content.into();
+        let reasoning_len = reasoning_content.as_ref().map_or(0, |r| r.len())
+            + encrypted_reasoning.as_ref().map_or(0, |r| r.len());
+        let token_estimate = (content.len() + reasoning_len) / 4;
+        Self::AssistantMessage {
+            content,
+            token_estimate,
+            reasoning_content,
+            encrypted_reasoning,
         }
     }
 
@@ -525,6 +552,71 @@ mod tests {
         let tool = TranscriptEntry::tool_call("c1", "grep", "{}");
         let json = serde_json::to_string(&tool).unwrap();
         assert!(json.contains(r#""type":"ToolCall""#));
+    }
+
+    // --- Reasoning fields ---
+
+    #[test]
+    fn old_transcript_without_reasoning_fields_loads() {
+        // Simulate a transcript entry from before reasoning support was added
+        let old_json = r#"{"type":"AssistantMessage","content":"Hello!","token_estimate":1}"#;
+        let entry: TranscriptEntry = serde_json::from_str(old_json).unwrap();
+        if let TranscriptEntry::AssistantMessage {
+            content,
+            reasoning_content,
+            encrypted_reasoning,
+            ..
+        } = &entry
+        {
+            assert_eq!(content, "Hello!");
+            assert!(reasoning_content.is_none());
+            assert!(encrypted_reasoning.is_none());
+        } else {
+            panic!("Expected AssistantMessage");
+        }
+    }
+
+    #[test]
+    fn assistant_message_with_reasoning_roundtrip() {
+        let entry = TranscriptEntry::assistant_message_with_reasoning(
+            "visible text",
+            Some("thinking step by step...".to_string()),
+            None,
+        );
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: TranscriptEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(entry, parsed);
+
+        if let TranscriptEntry::AssistantMessage {
+            reasoning_content, ..
+        } = &parsed
+        {
+            assert_eq!(
+                reasoning_content.as_deref(),
+                Some("thinking step by step...")
+            );
+        }
+    }
+
+    #[test]
+    fn assistant_message_with_reasoning_includes_payload_in_token_estimate() {
+        let plain = TranscriptEntry::assistant_message("hello");
+        let with_reasoning = TranscriptEntry::assistant_message_with_reasoning(
+            "hello",
+            Some("x".repeat(400)),
+            None,
+        );
+        assert!(with_reasoning.token_estimate() > plain.token_estimate());
+        // "hello" (5) + reasoning (400) = 405 / 4 = 101
+        assert_eq!(with_reasoning.token_estimate(), 405 / 4);
+    }
+
+    #[test]
+    fn reasoning_fields_omitted_when_none_in_serialization() {
+        let entry = TranscriptEntry::assistant_message("test");
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(!json.contains("reasoning_content"));
+        assert!(!json.contains("encrypted_reasoning"));
     }
 
     // --- Checkpoint ---

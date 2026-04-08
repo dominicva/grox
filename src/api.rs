@@ -32,12 +32,18 @@ pub struct TurnResponse {
     pub text: String,
     pub tool_calls: Vec<ToolCall>,
     pub usage: Option<Usage>,
+    /// Plaintext reasoning content (grok-3-mini)
+    pub reasoning_content: Option<String>,
+    /// Encrypted/opaque reasoning blob (grok-4 reasoning models)
+    pub encrypted_reasoning: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub cached_input_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
 }
 
 // --- Trait ---
@@ -99,10 +105,16 @@ const RETRY_DELAYS: &[u64] = &[1, 3];
 /// Check if an API error body indicates the model itself was rejected.
 fn is_model_rejection(body: &str) -> bool {
     let lower = body.to_lowercase();
-    lower.contains("model not found")
-        || lower.contains("model_not_found")
-        || lower.contains("model not supported")
-        || lower.contains("model_not_supported")
+    [
+        "model not found",
+        "model_not_found",
+        "model-not-found",
+        "model not supported",
+        "model_not_supported",
+        "model-not-supported",
+    ]
+    .iter()
+    .any(|pattern| lower.contains(pattern))
 }
 
 #[async_trait]
@@ -254,9 +266,19 @@ impl GrokApi for GrokClient {
                                 u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                             let output_tokens =
                                 u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let cached_input_tokens = u
+                                .get("input_tokens_details")
+                                .and_then(|d| d.get("cached_tokens"))
+                                .and_then(|v| v.as_u64());
+                            let reasoning_tokens = u
+                                .get("output_tokens_details")
+                                .and_then(|d| d.get("reasoning_tokens"))
+                                .and_then(|v| v.as_u64());
                             usage = Some(Usage {
                                 input_tokens,
                                 output_tokens,
+                                cached_input_tokens,
+                                reasoning_tokens,
                             });
                         }
                     }
@@ -268,10 +290,42 @@ impl GrokApi for GrokClient {
                 text,
                 tool_calls,
                 usage,
+                reasoning_content: None,
+                encrypted_reasoning: None,
             });
         }
 
         bail!("Request failed after retries")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_model_rejection;
+
+    #[test]
+    fn model_rejection_matches_documented_variants() {
+        for body in [
+            "model not found",
+            "MODEL_NOT_FOUND",
+            "model-not-found",
+            "model not supported",
+            "MODEL_NOT_SUPPORTED",
+            "model-not-supported",
+        ] {
+            assert!(is_model_rejection(body), "{body} should match");
+        }
+    }
+
+    #[test]
+    fn model_rejection_ignores_unrelated_errors() {
+        for body in [
+            "rate limit exceeded",
+            "temporary upstream error",
+            "invalid tool schema",
+        ] {
+            assert!(!is_model_rejection(body), "{body} should not match");
+        }
     }
 }
 
