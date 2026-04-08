@@ -66,7 +66,7 @@ impl FileIndex {
             .map(|e| {
                 let suffix = if e.is_dir { "/" } else { " " };
                 let display = format!("{}{suffix}", e.rel_path);
-                let replacement = e.rel_path.clone();
+                let replacement = format!("{}{suffix}", e.rel_path);
                 (display, replacement)
             })
             .collect();
@@ -201,6 +201,23 @@ mod tests {
         let completions = idx.completions("src");
         let paths: Vec<&str> = completions.iter().map(|(d, _)| d.as_str()).collect();
         assert!(paths.contains(&"src/"));
+    }
+
+    #[test]
+    fn replacement_includes_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "").unwrap();
+        fs::write(dir.path().join("main.rs"), "").unwrap();
+
+        let idx = FileIndex::build(dir.path());
+        let completions = idx.completions("");
+        // Directory replacement ends with /
+        let dir_entry = completions.iter().find(|(d, _)| d == "src/").unwrap();
+        assert_eq!(dir_entry.1, "src/");
+        // File replacement ends with space
+        let file_entry = completions.iter().find(|(d, _)| d == "main.rs ").unwrap();
+        assert_eq!(file_entry.1, "main.rs ");
     }
 
     #[test]

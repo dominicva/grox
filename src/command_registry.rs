@@ -318,13 +318,16 @@ impl Hint for CommandHint {
 // File path token extraction
 // ---------------------------------------------------------------------------
 
-/// Path trigger prefixes that activate file completion.
-const PATH_TRIGGERS: &[&str] = &["@", "./", "../", "~/"];
-
 /// Extract the path-like token at the cursor position.
 ///
 /// Returns `(token_start_position, token_text)` if the text at the cursor
-/// looks like a file path (starts with `@`, `./`, `../`, `~`, or contains `/`).
+/// looks like a file path. Triggers on:
+/// - `@` prefix (stripped from the query, e.g. `@src/main` → query `src/main`)
+/// - `./` prefix (e.g. `./src/lib.rs`)
+/// - Tokens containing `/` (e.g. `src/main`)
+///
+/// Does NOT trigger on `../`, `~/`, or absolute `/` paths since the file
+/// index only contains project-relative entries and cannot resolve those.
 fn extract_path_token(line: &str, pos: usize) -> Option<(usize, &str)> {
     let before_cursor = &line[..pos];
 
@@ -339,19 +342,27 @@ fn extract_path_token(line: &str, pos: usize) -> Option<(usize, &str)> {
         return None;
     }
 
-    // Check if the token starts with a path trigger
-    for trigger in PATH_TRIGGERS {
-        if token.starts_with(trigger) {
-            // For @, strip the prefix and adjust start position
-            if *trigger == "@" {
-                return Some((token_start + 1, &token[1..]));
-            }
-            return Some((token_start, token));
+    // @ prefix: strip and return the remainder
+    if token.starts_with('@') {
+        let rest = &token[1..];
+        if rest.is_empty() {
+            return None;
         }
+        return Some((token_start + 1, rest));
     }
 
-    // Also trigger on tokens containing `/` (e.g. `src/main`)
-    if token.contains('/') {
+    // ./ prefix: pass through (completions() strips it)
+    if token.starts_with("./") {
+        return Some((token_start, token));
+    }
+
+    // Tokens containing / (but NOT starting with / to avoid clashing with
+    // slash commands, and NOT ../ or ~/ which can't match project-relative paths)
+    if token.contains('/')
+        && !token.starts_with('/')
+        && !token.starts_with("../")
+        && !token.starts_with("~/")
+    {
         return Some((token_start, token));
     }
 
@@ -557,17 +568,21 @@ mod tests {
     }
 
     #[test]
-    fn extract_dot_dot_slash() {
-        let (start, token) = extract_path_token("read ../file.txt", 16).unwrap();
-        assert_eq!(start, 5);
-        assert_eq!(token, "../file.txt");
+    fn extract_dot_dot_slash_ignored() {
+        // ../ paths can't match project-relative entries
+        assert!(extract_path_token("read ../file.txt", 16).is_none());
     }
 
     #[test]
-    fn extract_tilde_prefix() {
-        let (start, token) = extract_path_token("check ~/config", 14).unwrap();
-        assert_eq!(start, 6);
-        assert_eq!(token, "~/config");
+    fn extract_tilde_prefix_ignored() {
+        // ~/ paths can't match project-relative entries
+        assert!(extract_path_token("check ~/config", 14).is_none());
+    }
+
+    #[test]
+    fn extract_absolute_path_ignored() {
+        // Absolute paths starting with / are not file completion triggers
+        assert!(extract_path_token("/etc/hosts", 10).is_none());
     }
 
     #[test]

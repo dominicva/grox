@@ -112,12 +112,14 @@ impl Renderer for TerminalRenderer {
     }
 
     fn on_tool_call(&mut self, name: &str, args: &str) {
+        self.flush_line_buffer();
         let summary = summarize_tool_call(name, args);
         println!("  {} {}", format!("▸ {name}").cyan(), summary.dimmed());
         let _ = stdout().flush();
     }
 
     fn on_tool_result(&mut self, name: &str, output: &str) {
+        self.flush_line_buffer();
         const MAX_DISPLAY_LINES: usize = 20;
 
         let is_error = output.starts_with("Error:")
@@ -168,6 +170,7 @@ impl Renderer for TerminalRenderer {
         encrypted: Option<&str>,
         reasoning_tokens: Option<u64>,
     ) {
+        self.flush_line_buffer();
         let expanded = self.thinking_expanded.load(Ordering::Relaxed);
 
         if let Some(rc) = plaintext {
