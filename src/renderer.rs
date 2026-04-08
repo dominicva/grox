@@ -45,6 +45,7 @@ pub trait Renderer: Send {
 pub struct TerminalRenderer {
     first_token: bool,
     thinking_expanded: Arc<AtomicBool>,
+    line_buffer: String,
     ss: SyntaxSet,
     ts: ThemeSet,
 }
@@ -54,6 +55,7 @@ impl TerminalRenderer {
         Self {
             first_token: true,
             thinking_expanded: Arc::new(AtomicBool::new(true)),
+            line_buffer: String::new(),
             ss: SyntaxSet::load_defaults_newlines(),
             ts: ThemeSet::load_defaults(),
         }
@@ -64,6 +66,18 @@ impl TerminalRenderer {
     /// persists across turns.
     pub fn begin_turn(&mut self) {
         self.first_token = true;
+        self.line_buffer.clear();
+    }
+
+    /// Flush any remaining content in the line buffer to stdout.
+    /// Called after a turn completes to emit the final partial line.
+    pub fn flush_line_buffer(&mut self) {
+        if !self.line_buffer.is_empty() {
+            let formatted = format_markdown_line(&self.line_buffer);
+            print!("{formatted}");
+            let _ = stdout().flush();
+            self.line_buffer.clear();
+        }
     }
 
     /// Get a shared handle to the thinking-expanded flag.
@@ -86,8 +100,15 @@ impl Renderer for TerminalRenderer {
         if self.first_token && !token.trim().is_empty() {
             self.first_token = false;
         }
-        print!("{token}");
-        let _ = stdout().flush();
+        self.line_buffer.push_str(&token);
+        // Emit all complete lines, keep the trailing partial line buffered.
+        while let Some(nl_pos) = self.line_buffer.find('\n') {
+            let line = self.line_buffer[..nl_pos].to_string();
+            self.line_buffer = self.line_buffer[nl_pos + 1..].to_string();
+            let formatted = format_markdown_line(&line);
+            println!("{formatted}");
+            let _ = stdout().flush();
+        }
     }
 
     fn on_tool_call(&mut self, name: &str, args: &str) {
@@ -276,6 +297,63 @@ impl Renderer for RecordingRenderer {
     }
 }
 
+/// Format a single line of markdown for terminal display.
+///
+/// Applies limited markdown formatting:
+/// - Headings: `#`, `##`, `###` at line start → bold text (without the `#` markers)
+/// - Bold: `**text**` → ANSI bold
+/// - Everything else passes through unstyled.
+pub fn format_markdown_line(line: &str) -> String {
+    let trimmed = line.trim_start();
+
+    // Heading: # at start of line → bold (strip the # markers)
+    if let Some(rest) = trimmed.strip_prefix("### ") {
+        return format!("\x1b[1m{rest}\x1b[0m");
+    }
+    if let Some(rest) = trimmed.strip_prefix("## ") {
+        return format!("\x1b[1m{rest}\x1b[0m");
+    }
+    if let Some(rest) = trimmed.strip_prefix("# ") {
+        return format!("\x1b[1m{rest}\x1b[0m");
+    }
+
+    // Bold: **text** → ANSI bold
+    if !line.contains("**") {
+        return line.to_string();
+    }
+
+    let mut result = String::with_capacity(line.len() + 20);
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '*' && chars.peek() == Some(&'*') {
+            chars.next(); // consume second *
+            // Collect bold content until closing **
+            let mut bold = String::new();
+            let mut closed = false;
+            while let Some(inner) = chars.next() {
+                if inner == '*' && chars.peek() == Some(&'*') {
+                    chars.next(); // consume closing *
+                    closed = true;
+                    break;
+                }
+                bold.push(inner);
+            }
+            if closed && !bold.is_empty() {
+                result.push_str("\x1b[1m");
+                result.push_str(&bold);
+                result.push_str("\x1b[0m");
+            } else {
+                // Unclosed ** — pass through raw
+                result.push_str("**");
+                result.push_str(&bold);
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
 /// Summarize a tool call into a compact display string.
 pub fn summarize_tool_call(name: &str, args: &str) -> String {
     let parsed: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
@@ -423,6 +501,72 @@ mod tests {
         r.toggle_thinking_display(); // collapsed
         r.begin_turn();
         assert!(!r.thinking_expanded.load(Ordering::Relaxed));
+    }
+
+    // --- Markdown formatting ---
+
+    #[test]
+    fn markdown_heading_h1() {
+        assert_eq!(format_markdown_line("# Hello"), "\x1b[1mHello\x1b[0m");
+    }
+
+    #[test]
+    fn markdown_heading_h2() {
+        assert_eq!(format_markdown_line("## World"), "\x1b[1mWorld\x1b[0m");
+    }
+
+    #[test]
+    fn markdown_heading_h3() {
+        assert_eq!(format_markdown_line("### Details"), "\x1b[1mDetails\x1b[0m");
+    }
+
+    #[test]
+    fn markdown_bold() {
+        assert_eq!(
+            format_markdown_line("this is **bold** text"),
+            "this is \x1b[1mbold\x1b[0m text"
+        );
+    }
+
+    #[test]
+    fn markdown_multiple_bold() {
+        assert_eq!(
+            format_markdown_line("**a** and **b**"),
+            "\x1b[1ma\x1b[0m and \x1b[1mb\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn markdown_unclosed_bold_passthrough() {
+        assert_eq!(format_markdown_line("this is **unclosed"), "this is **unclosed");
+    }
+
+    #[test]
+    fn markdown_plain_text_passthrough() {
+        assert_eq!(format_markdown_line("just plain text"), "just plain text");
+    }
+
+    #[test]
+    fn markdown_empty_line() {
+        assert_eq!(format_markdown_line(""), "");
+    }
+
+    #[test]
+    fn markdown_heading_with_leading_whitespace() {
+        assert_eq!(format_markdown_line("  # Indented"), "\x1b[1mIndented\x1b[0m");
+    }
+
+    #[test]
+    fn markdown_no_bold_without_stars() {
+        let line = "no formatting here at all";
+        assert_eq!(format_markdown_line(line), line);
+    }
+
+    #[test]
+    fn markdown_empty_bold_passthrough() {
+        // **** is ** then empty bold content — the empty bold is dropped,
+        // and the remaining ** passes through as unclosed
+        assert_eq!(format_markdown_line("****"), "**");
     }
 
     // --- summarize_tool_call ---

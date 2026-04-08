@@ -864,7 +864,7 @@ async fn main() -> Result<()> {
 
         term_renderer.begin_turn();
         let agent = Agent::new(&client, &project_root);
-        match agent
+        let run_result = agent
             .run(
                 api_input,
                 &mut term_renderer,
@@ -898,8 +898,12 @@ async fn main() -> Result<()> {
                     Ok(())
                 },
             )
-            .await
-        {
+            .await;
+
+        // Flush any partial line remaining in the markdown buffer
+        term_renderer.flush_line_buffer();
+
+        match run_result {
             Ok(result) => {
                 if result.text.is_empty() {
                     println!("{}", "(no response from model)".dimmed());
