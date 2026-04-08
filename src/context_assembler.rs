@@ -9,7 +9,7 @@ use crate::session::TranscriptEntry;
 /// - `AssistantMessage` → `{"role": "assistant", "content": "..."}`
 /// - `ToolCall` → `{"type": "function_call", "name": "...", "arguments": "...", "call_id": "..."}`
 /// - `ToolResult` → `{"type": "function_call_output", "call_id": "...", "output": "..."}`
-/// - `CompactionSummary` → `{"role": "system", "content": "[Context summary]\n\n..."}`
+/// - `CompactionSummary` → inlined into the system prompt (only the most recent)
 /// - `SystemEvent` → skipped (internal bookkeeping, not sent to model)
 pub struct ContextAssembler {
     system_prompt: Value,
@@ -43,10 +43,34 @@ impl ContextAssembler {
 
     /// Build the message array for the API call.
     ///
-    /// Order: system prompt → compaction summary (if any) → conversation history.
+    /// The most recent CompactionSummary is appended to the system prompt content
+    /// (separated by `---`), producing exactly one system message at position 0.
+    /// Earlier summaries are ignored (they were already incorporated by compaction).
+    /// CompactionSummary entries are never emitted as separate messages.
     pub fn build_messages(&self, entries: &[TranscriptEntry]) -> Vec<Value> {
         let mut messages = Vec::new();
-        messages.push(self.system_prompt.clone());
+
+        // Find the most recent CompactionSummary (if any) and inline it
+        let latest_summary = entries.iter().rev().find_map(|e| match e {
+            TranscriptEntry::CompactionSummary { summary, .. } => Some(summary.as_str()),
+            _ => None,
+        });
+
+        if let Some(summary) = latest_summary {
+            let base_content = self
+                .system_prompt
+                .get("content")
+                .and_then(|c| c.as_str())
+                .unwrap_or("");
+            let combined = format!(
+                "{base_content}\n\n---\n\n[Context summary from earlier in this conversation]\n\n{summary}"
+            );
+            let mut prompt = self.system_prompt.clone();
+            prompt["content"] = Value::String(combined);
+            messages.push(prompt);
+        } else {
+            messages.push(self.system_prompt.clone());
+        }
 
         for entry in entries {
             match entry {
@@ -84,14 +108,11 @@ impl ContextAssembler {
                         "output": output,
                     }));
                 }
-                TranscriptEntry::CompactionSummary { summary, .. } => {
-                    messages.push(json!({
-                        "role": "system",
-                        "content": format!("[Context summary from earlier in this conversation]\n\n{summary}"),
-                    }));
-                }
-                TranscriptEntry::SystemEvent { .. } | TranscriptEntry::Checkpoint { .. } => {
-                    // Internal bookkeeping — not sent to the model
+                TranscriptEntry::CompactionSummary { .. }
+                | TranscriptEntry::SystemEvent { .. }
+                | TranscriptEntry::Checkpoint { .. } => {
+                    // CompactionSummary: inlined into system prompt above
+                    // SystemEvent/Checkpoint: internal bookkeeping, not sent to model
                 }
             }
         }
@@ -102,9 +123,27 @@ impl ContextAssembler {
     /// Estimate the total token count for a potential API request.
     ///
     /// Sums system-layer overhead + per-entry token estimates.
+    /// CompactionSummary entries are excluded from the transcript sum because
+    /// they are inlined into the system prompt (and counted via system overhead).
     pub fn estimate_tokens(&self, entries: &[TranscriptEntry]) -> usize {
-        let transcript_tokens: usize = entries.iter().map(|e| e.token_estimate()).sum();
-        self.system_overhead_estimate + transcript_tokens
+        let transcript_tokens: usize = entries
+            .iter()
+            .filter(|e| !matches!(e, TranscriptEntry::CompactionSummary { .. }))
+            .map(|e| e.token_estimate())
+            .sum();
+
+        // The most recent CompactionSummary is inlined into the system prompt,
+        // so add its tokens to the system overhead for this estimate.
+        let summary_tokens = entries
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                TranscriptEntry::CompactionSummary { token_estimate, .. } => Some(*token_estimate),
+                _ => None,
+            })
+            .unwrap_or(0);
+
+        self.system_overhead_estimate + summary_tokens + transcript_tokens
     }
 }
 
@@ -195,16 +234,19 @@ mod tests {
     }
 
     #[test]
-    fn compaction_summary_wire_format() {
+    fn compaction_summary_inlined_into_system_prompt() {
         let assembler = ContextAssembler::new(test_system_prompt());
         let entries = vec![TranscriptEntry::compaction_summary(
             "User asked about auth. Files read: src/auth.rs",
         )];
         let messages = assembler.build_messages(&entries);
 
-        assert_eq!(messages[1]["role"], "system");
-        let content = messages[1]["content"].as_str().unwrap();
-        assert!(content.starts_with("[Context summary"));
+        // Only one message: system prompt with summary inlined
+        assert_eq!(messages.len(), 1);
+        let content = messages[0]["content"].as_str().unwrap();
+        assert!(content.starts_with("You are a helpful assistant."));
+        assert!(content.contains("---"));
+        assert!(content.contains("[Context summary from earlier in this conversation]"));
         assert!(content.contains("User asked about auth"));
     }
 
@@ -223,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn message_ordering_system_then_summary_then_history() {
+    fn message_ordering_summary_inlined_then_history() {
         let assembler = ContextAssembler::new(test_system_prompt());
         let entries = vec![
             TranscriptEntry::compaction_summary("Earlier conversation summary"),
@@ -232,11 +274,40 @@ mod tests {
         ];
         let messages = assembler.build_messages(&entries);
 
-        assert_eq!(messages.len(), 4);
-        assert_eq!(messages[0]["role"], "system"); // system prompt
-        assert_eq!(messages[1]["role"], "system"); // compaction summary
-        assert_eq!(messages[2]["role"], "user");
-        assert_eq!(messages[3]["role"], "assistant");
+        // 3 messages: system prompt (with summary inlined) + user + assistant
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"], "system");
+        let content = messages[0]["content"].as_str().unwrap();
+        assert!(content.contains("Earlier conversation summary"));
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[2]["role"], "assistant");
+    }
+
+    #[test]
+    fn multiple_compaction_summaries_only_latest_used() {
+        let assembler = ContextAssembler::new(test_system_prompt());
+        let entries = vec![
+            TranscriptEntry::compaction_summary("Old summary"),
+            TranscriptEntry::user_message("middle"),
+            TranscriptEntry::compaction_summary("Latest summary"),
+            TranscriptEntry::user_message("What next?"),
+        ];
+        let messages = assembler.build_messages(&entries);
+
+        // system prompt (with latest summary) + 2 user messages
+        assert_eq!(messages.len(), 3);
+        let content = messages[0]["content"].as_str().unwrap();
+        assert!(content.contains("Latest summary"));
+        assert!(!content.contains("Old summary"));
+    }
+
+    #[test]
+    fn no_compaction_summary_leaves_system_prompt_unchanged() {
+        let assembler = ContextAssembler::new(test_system_prompt());
+        let entries = vec![TranscriptEntry::user_message("hello")];
+        let messages = assembler.build_messages(&entries);
+
+        assert_eq!(messages[0]["content"], "You are a helpful assistant.");
     }
 
     #[test]
@@ -313,5 +384,41 @@ mod tests {
         let assembler = ContextAssembler::new(test_system_prompt());
         let messages = assembler.build_messages(&[]);
         assert_eq!(messages.len(), 1); // just system prompt
+    }
+
+    #[test]
+    fn estimate_tokens_excludes_compaction_summary_from_transcript() {
+        let assembler = ContextAssembler::new(test_system_prompt());
+        let summary_text = "x".repeat(400); // 400 chars = 100 tokens
+        let entries = vec![
+            TranscriptEntry::compaction_summary(&summary_text),
+            TranscriptEntry::user_message("hello world"), // 11/4 = 2
+        ];
+        let estimate = assembler.estimate_tokens(&entries);
+
+        let overhead = "You are a helpful assistant.".len() / 4; // 7
+        let user_tokens = "hello world".len() / 4; // 2
+        let summary_tokens = 400 / 4; // 100
+
+        // Summary tokens counted as system overhead, not transcript
+        assert_eq!(estimate, overhead + summary_tokens + user_tokens);
+    }
+
+    #[test]
+    fn estimate_tokens_no_double_count_across_compaction_cycles() {
+        let assembler = ContextAssembler::new(test_system_prompt());
+        let entries = vec![
+            TranscriptEntry::compaction_summary("old summary that was folded in"),
+            TranscriptEntry::compaction_summary("latest summary"),
+            TranscriptEntry::user_message("hello"),
+        ];
+
+        let estimate = assembler.estimate_tokens(&entries);
+        let overhead = "You are a helpful assistant.".len() / 4;
+        let user_tokens = "hello".len() / 4;
+        // Only the latest summary is counted (inlined into system prompt)
+        let latest_summary_tokens = "latest summary".len() / 4;
+
+        assert_eq!(estimate, overhead + latest_summary_tokens + user_tokens);
     }
 }
