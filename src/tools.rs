@@ -46,6 +46,17 @@ fn count_occurrences(haystack: &str, needle: &str) -> usize {
     count
 }
 
+/// Typed result from tool execution, replacing bare strings.
+/// Checkpoint emission and undo behavior are driven by `success`.
+#[derive(Debug, Clone)]
+pub struct ToolOutcome {
+    /// Whether the tool executed successfully (file was written, command ran, etc.).
+    /// False for errors, permission denials, and validation failures.
+    pub success: bool,
+    /// Human-readable output to send back to the model.
+    pub output: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum Tool {
     FileRead,
@@ -228,14 +239,24 @@ impl Tool {
         }
     }
 
-    pub async fn execute(&self, arguments: &str, project_root: &std::path::Path) -> Result<String> {
-        match self {
+    pub async fn execute(&self, arguments: &str, project_root: &std::path::Path) -> ToolOutcome {
+        let result = match self {
             Tool::FileRead => execute_file_read(arguments, project_root),
             Tool::FileWrite => execute_file_write(arguments, project_root),
             Tool::FileEdit => execute_file_edit(arguments, project_root),
             Tool::ListFiles => execute_list_files(arguments, project_root),
             Tool::ShellExec => execute_shell_exec(arguments, project_root).await,
             Tool::Grep => execute_grep(arguments, project_root).await,
+        };
+        match result {
+            Ok(output) => ToolOutcome {
+                success: true,
+                output,
+            },
+            Err(e) => ToolOutcome {
+                success: false,
+                output: format!("Error: {e}"),
+            },
         }
     }
 }
@@ -614,34 +635,24 @@ mod tests {
         let path = tmp.path().to_str().unwrap();
 
         let args = json!({"path": path}).to_string();
-        let result = Tool::FileRead.execute(&args, dummy_root()).await.unwrap();
-        assert_eq!(result, "hello world");
+        let result = Tool::FileRead.execute(&args, dummy_root()).await;
+        assert_eq!(result.output, "hello world");
     }
 
     #[tokio::test]
     async fn file_read_not_found() {
         let args = json!({"path": "/nonexistent/file.txt"}).to_string();
         let result = Tool::FileRead.execute(&args, dummy_root()).await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Failed to read file")
-        );
+        assert!(!result.success);
+        assert!(result.output.contains("Failed to read file"));
     }
 
     #[tokio::test]
     async fn file_read_missing_path_param() {
         let args = json!({}).to_string();
         let result = Tool::FileRead.execute(&args, dummy_root()).await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Missing required parameter")
-        );
+        assert!(!result.success);
+        assert!(result.output.contains("Missing required parameter"));
     }
 
     #[test]
@@ -677,8 +688,8 @@ mod tests {
 
         let args = json!({"path": path}).to_string();
         let result = Tool::FileRead.execute(&args, dummy_root()).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("binary"));
+        assert!(!result.success);
+        assert!(result.output.contains("binary"));
     }
 
     #[tokio::test]
@@ -689,9 +700,9 @@ mod tests {
         let path = tmp.path().to_str().unwrap();
 
         let args = json!({"path": path}).to_string();
-        let result = Tool::FileRead.execute(&args, dummy_root()).await.unwrap();
-        assert!(result.len() < content.len());
-        assert!(result.contains("truncated"));
+        let result = Tool::FileRead.execute(&args, dummy_root()).await;
+        assert!(result.output.len() < content.len());
+        assert!(result.output.contains("truncated"));
     }
 
     // --- file_write tests ---
@@ -706,8 +717,8 @@ mod tests {
         })
         .to_string();
 
-        let result = Tool::FileWrite.execute(&args, dir.path()).await.unwrap();
-        assert!(result.contains("11 bytes"));
+        let result = Tool::FileWrite.execute(&args, dir.path()).await;
+        assert!(result.output.contains("11 bytes"));
         assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "hello write");
     }
 
@@ -721,8 +732,8 @@ mod tests {
         })
         .to_string();
 
-        let result = Tool::FileWrite.execute(&args, dir.path()).await.unwrap();
-        assert!(result.contains("bytes"));
+        let result = Tool::FileWrite.execute(&args, dir.path()).await;
+        assert!(result.output.contains("bytes"));
         assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "nested");
     }
 
@@ -743,13 +754,8 @@ mod tests {
         .to_string();
 
         let result = Tool::FileWrite.execute(&args, dir.path()).await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("outside the project root")
-        );
+        assert!(!result.success);
+        assert!(result.output.contains("outside the project root"));
     }
 
     // --- file_edit tests ---
@@ -767,8 +773,8 @@ mod tests {
         })
         .to_string();
 
-        let result = Tool::FileEdit.execute(&args, dir.path()).await.unwrap();
-        assert!(result.contains("Edited"));
+        let result = Tool::FileEdit.execute(&args, dir.path()).await;
+        assert!(result.output.contains("Edited"));
         assert_eq!(
             std::fs::read_to_string(&file_path).unwrap(),
             "goodbye world"
@@ -789,10 +795,10 @@ mod tests {
         })
         .to_string();
 
-        let result = Tool::FileEdit.execute(&args, dir.path()).await.unwrap();
-        assert!(result.contains("LINE FOUR"));
+        let result = Tool::FileEdit.execute(&args, dir.path()).await;
+        assert!(result.output.contains("LINE FOUR"));
         // Should show surrounding lines
-        assert!(result.contains("line 2") || result.contains("line 3"));
+        assert!(result.output.contains("line 2") || result.output.contains("line 3"));
     }
 
     #[tokio::test]
@@ -809,8 +815,8 @@ mod tests {
         .to_string();
 
         let result = Tool::FileEdit.execute(&args, dir.path()).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found"));
+        assert!(!result.success);
+        assert!(result.output.contains("not found"));
     }
 
     #[tokio::test]
@@ -827,8 +833,8 @@ mod tests {
         .to_string();
 
         let result = Tool::FileEdit.execute(&args, dir.path()).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
+        assert!(!result.success);
+        let err = &result.output;
         assert!(err.contains("3 locations"));
         // File should be unchanged
         assert_eq!(
@@ -851,13 +857,8 @@ mod tests {
         .to_string();
 
         let result = Tool::FileEdit.execute(&args, dir.path()).await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("must not be empty")
-        );
+        assert!(!result.success);
+        assert!(result.output.contains("must not be empty"));
     }
 
     #[tokio::test]
@@ -874,8 +875,8 @@ mod tests {
         .to_string();
 
         let result = Tool::FileEdit.execute(&args, dir.path()).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("identical"));
+        assert!(!result.success);
+        assert!(result.output.contains("identical"));
     }
 
     #[tokio::test]
@@ -891,7 +892,7 @@ mod tests {
         .to_string();
 
         let result = Tool::FileEdit.execute(&args, dir.path()).await;
-        assert!(result.is_err());
+        assert!(!result.success);
     }
 
     #[tokio::test]
@@ -908,8 +909,8 @@ mod tests {
         .to_string();
 
         let result = Tool::FileEdit.execute(&args, dir.path()).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("binary"));
+        assert!(!result.success);
+        assert!(result.output.contains("binary"));
     }
 
     #[tokio::test]
@@ -927,13 +928,8 @@ mod tests {
         .to_string();
 
         let result = Tool::FileEdit.execute(&args, dir.path()).await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("outside the project root")
-        );
+        assert!(!result.success);
+        assert!(result.output.contains("outside the project root"));
     }
 
     #[cfg(unix)]
@@ -955,13 +951,8 @@ mod tests {
         .to_string();
 
         let result = Tool::FileEdit.execute(&args, dir.path()).await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("outside the project root")
-        );
+        assert!(!result.success);
+        assert!(result.output.contains("outside the project root"));
     }
 
     #[tokio::test]
@@ -978,8 +969,8 @@ mod tests {
         .to_string();
 
         let result = Tool::FileEdit.execute(&args, dir.path()).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
+        assert!(!result.success);
+        let err = &result.output;
         assert!(
             err.contains("2 locations"),
             "expected 2 overlapping matches, got: {err}"
@@ -995,8 +986,8 @@ mod tests {
         std::fs::write(dir.path().join("src/lib.rs"), "pub fn hello() {}").unwrap();
 
         let args = json!({"path": "src/lib.rs"}).to_string();
-        let result = Tool::FileRead.execute(&args, dir.path()).await.unwrap();
-        assert!(result.contains("pub fn hello()"));
+        let result = Tool::FileRead.execute(&args, dir.path()).await;
+        assert!(result.output.contains("pub fn hello()"));
     }
 
     #[tokio::test]
@@ -1012,8 +1003,8 @@ mod tests {
         })
         .to_string();
 
-        let result = Tool::FileEdit.execute(&args, dir.path()).await.unwrap();
-        assert!(result.contains("Edited"));
+        let result = Tool::FileEdit.execute(&args, dir.path()).await;
+        assert!(result.output.contains("Edited"));
         assert_eq!(
             std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap(),
             "new content"
@@ -1027,8 +1018,8 @@ mod tests {
         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
 
         let args = json!({"path": "src"}).to_string();
-        let result = Tool::ListFiles.execute(&args, dir.path()).await.unwrap();
-        assert!(result.contains("main.rs"));
+        let result = Tool::ListFiles.execute(&args, dir.path()).await;
+        assert!(result.output.contains("main.rs"));
     }
 
     #[test]
@@ -1079,8 +1070,8 @@ mod tests {
         })
         .to_string();
 
-        let result = Tool::FileEdit.execute(&args, dir.path()).await.unwrap();
-        assert!(result.contains("Edited"));
+        let result = Tool::FileEdit.execute(&args, dir.path()).await;
+        assert!(result.output.contains("Edited"));
         assert_eq!(
             std::fs::read_to_string(&file_path).unwrap(),
             "coffee résumé"
@@ -1097,32 +1088,27 @@ mod tests {
         std::fs::create_dir(dir.path().join("subdir")).unwrap();
 
         let args = json!({"path": dir.path().to_str().unwrap()}).to_string();
-        let result = Tool::ListFiles.execute(&args, dummy_root()).await.unwrap();
+        let result = Tool::ListFiles.execute(&args, dummy_root()).await;
 
-        assert!(result.contains("a.txt"));
-        assert!(result.contains("b.rs"));
-        assert!(result.contains("subdir/"));
+        assert!(result.output.contains("a.txt"));
+        assert!(result.output.contains("b.rs"));
+        assert!(result.output.contains("subdir/"));
     }
 
     #[tokio::test]
     async fn list_files_empty_dir() {
         let dir = tempfile::tempdir().unwrap();
         let args = json!({"path": dir.path().to_str().unwrap()}).to_string();
-        let result = Tool::ListFiles.execute(&args, dummy_root()).await.unwrap();
-        assert_eq!(result, "");
+        let result = Tool::ListFiles.execute(&args, dummy_root()).await;
+        assert_eq!(result.output, "");
     }
 
     #[tokio::test]
     async fn list_files_nonexistent() {
         let args = json!({"path": "/nonexistent/dir"}).to_string();
         let result = Tool::ListFiles.execute(&args, dummy_root()).await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Failed to list directory")
-        );
+        assert!(!result.success);
+        assert!(result.output.contains("Failed to list directory"));
     }
 
     // --- shell_exec tests ---
@@ -1131,25 +1117,25 @@ mod tests {
     async fn shell_exec_happy_path() {
         let dir = tempfile::tempdir().unwrap();
         let args = json!({"command": "echo hello"}).to_string();
-        let result = Tool::ShellExec.execute(&args, dir.path()).await.unwrap();
-        assert_eq!(result.trim(), "hello");
+        let result = Tool::ShellExec.execute(&args, dir.path()).await;
+        assert_eq!(result.output.trim(), "hello");
     }
 
     #[tokio::test]
     async fn shell_exec_nonzero_exit() {
         let dir = tempfile::tempdir().unwrap();
         let args = json!({"command": "exit 42"}).to_string();
-        let result = Tool::ShellExec.execute(&args, dir.path()).await.unwrap();
-        assert!(result.contains("[exit code: 42]"));
+        let result = Tool::ShellExec.execute(&args, dir.path()).await;
+        assert!(result.output.contains("[exit code: 42]"));
     }
 
     #[tokio::test]
     async fn shell_exec_captures_stderr() {
         let dir = tempfile::tempdir().unwrap();
         let args = json!({"command": "echo err >&2"}).to_string();
-        let result = Tool::ShellExec.execute(&args, dir.path()).await.unwrap();
-        assert!(result.contains("[stderr]"));
-        assert!(result.contains("err"));
+        let result = Tool::ShellExec.execute(&args, dir.path()).await;
+        assert!(result.output.contains("[stderr]"));
+        assert!(result.output.contains("err"));
     }
 
     #[tokio::test]
@@ -1157,8 +1143,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let args = json!({"command": "sleep 60", "timeout_secs": 1}).to_string();
         let result = Tool::ShellExec.execute(&args, dir.path()).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("timed out"));
+        assert!(!result.success);
+        assert!(result.output.contains("timed out"));
     }
 
     #[tokio::test]
@@ -1172,19 +1158,19 @@ mod tests {
             "cwd": sub.to_str().unwrap()
         })
         .to_string();
-        let result = Tool::ShellExec.execute(&args, dir.path()).await.unwrap();
+        let result = Tool::ShellExec.execute(&args, dir.path()).await;
         // pwd output should contain the subdir path
-        assert!(result.contains("subdir"));
+        assert!(result.output.contains("subdir"));
     }
 
     #[tokio::test]
     async fn shell_exec_default_cwd_is_project_root() {
         let dir = tempfile::tempdir().unwrap();
         let args = json!({"command": "pwd"}).to_string();
-        let result = Tool::ShellExec.execute(&args, dir.path()).await.unwrap();
+        let result = Tool::ShellExec.execute(&args, dir.path()).await;
         // The canonical path of the tempdir should appear in pwd output
         let canonical = dir.path().canonicalize().unwrap();
-        assert!(result.contains(canonical.to_str().unwrap()));
+        assert!(result.output.contains(canonical.to_str().unwrap()));
     }
 
     #[tokio::test]
@@ -1196,8 +1182,8 @@ mod tests {
         })
         .to_string();
         let result = Tool::ShellExec.execute(&args, dir.path()).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("does not exist"));
+        assert!(!result.success);
+        assert!(result.output.contains("does not exist"));
     }
 
     #[tokio::test]
@@ -1205,8 +1191,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // Request 999 seconds — should be capped to 300
         let args = json!({"command": "echo ok", "timeout_secs": 999}).to_string();
-        let result = Tool::ShellExec.execute(&args, dir.path()).await.unwrap();
-        assert_eq!(result.trim(), "ok");
+        let result = Tool::ShellExec.execute(&args, dir.path()).await;
+        assert_eq!(result.output.trim(), "ok");
     }
 
     #[tokio::test]
@@ -1220,8 +1206,8 @@ mod tests {
             "cwd": "src"
         })
         .to_string();
-        let result = Tool::ShellExec.execute(&args, dir.path()).await.unwrap();
-        assert!(result.contains("src"));
+        let result = Tool::ShellExec.execute(&args, dir.path()).await;
+        assert!(result.output.contains("src"));
     }
 
     #[tokio::test]
@@ -1235,8 +1221,8 @@ mod tests {
             "cwd": sub.to_str().unwrap()
         })
         .to_string();
-        let result = Tool::ShellExec.execute(&args, dir.path()).await.unwrap();
-        assert!(result.contains("inner"));
+        let result = Tool::ShellExec.execute(&args, dir.path()).await;
+        assert!(result.output.contains("inner"));
     }
 
     #[tokio::test]
@@ -1250,13 +1236,8 @@ mod tests {
         })
         .to_string();
         let result = Tool::ShellExec.execute(&args, dir.path()).await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("outside the project root")
-        );
+        assert!(!result.success);
+        assert!(result.output.contains("outside the project root"));
     }
 
     #[tokio::test]
@@ -1272,13 +1253,8 @@ mod tests {
         })
         .to_string();
         let result = Tool::ShellExec.execute(&args, dir.path()).await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("outside the project root")
-        );
+        assert!(!result.success);
+        assert!(result.output.contains("outside the project root"));
     }
 
     // --- grep tests ---
@@ -1293,9 +1269,9 @@ mod tests {
         .unwrap();
 
         let args = json!({"pattern": "hello", "path": dir.path().to_str().unwrap()}).to_string();
-        let result = Tool::Grep.execute(&args, dir.path()).await.unwrap();
-        assert!(result.contains("hello"));
-        assert!(result.contains("hello.txt"));
+        let result = Tool::Grep.execute(&args, dir.path()).await;
+        assert!(result.output.contains("hello"));
+        assert!(result.output.contains("hello.txt"));
     }
 
     #[tokio::test]
@@ -1304,8 +1280,8 @@ mod tests {
         std::fs::write(dir.path().join("test.txt"), "nothing here").unwrap();
 
         let args = json!({"pattern": "xyz123", "path": dir.path().to_str().unwrap()}).to_string();
-        let result = Tool::Grep.execute(&args, dir.path()).await.unwrap();
-        assert_eq!(result, "No matches found.");
+        let result = Tool::Grep.execute(&args, dir.path()).await;
+        assert_eq!(result.output, "No matches found.");
     }
 
     #[tokio::test]
@@ -1315,8 +1291,8 @@ mod tests {
 
         let args = json!({"pattern": "[invalid", "path": dir.path().to_str().unwrap()}).to_string();
         let result = Tool::Grep.execute(&args, dir.path()).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Grep error"));
+        assert!(!result.success);
+        assert!(result.output.contains("Grep error"));
     }
 
     #[tokio::test]
@@ -1331,9 +1307,9 @@ mod tests {
             "glob": "*.rs"
         })
         .to_string();
-        let result = Tool::Grep.execute(&args, dir.path()).await.unwrap();
-        assert!(result.contains("code.rs"));
-        assert!(!result.contains("notes.txt"));
+        let result = Tool::Grep.execute(&args, dir.path()).await;
+        assert!(result.output.contains("code.rs"));
+        assert!(!result.output.contains("notes.txt"));
     }
 
     #[tokio::test]
@@ -1347,10 +1323,10 @@ mod tests {
             "case_insensitive": true
         })
         .to_string();
-        let result = Tool::Grep.execute(&args, dir.path()).await.unwrap();
+        let result = Tool::Grep.execute(&args, dir.path()).await;
         // Should match both lines
-        assert!(result.contains("Hello"));
-        assert!(result.contains("hello"));
+        assert!(result.output.contains("Hello"));
+        assert!(result.output.contains("hello"));
     }
 
     #[tokio::test]
@@ -1365,8 +1341,12 @@ mod tests {
             "max_results": 5
         })
         .to_string();
-        let result = Tool::Grep.execute(&args, dir.path()).await.unwrap();
-        let match_lines: Vec<&str> = result.lines().filter(|l| l.contains("match")).collect();
+        let result = Tool::Grep.execute(&args, dir.path()).await;
+        let match_lines: Vec<&str> = result
+            .output
+            .lines()
+            .filter(|l| l.contains("match"))
+            .collect();
         assert!(match_lines.len() <= 5);
     }
 
@@ -1377,7 +1357,7 @@ mod tests {
 
         // No path param — should search project root
         let args = json!({"pattern": "findme"}).to_string();
-        let result = Tool::Grep.execute(&args, dir.path()).await.unwrap();
-        assert!(result.contains("findme"));
+        let result = Tool::Grep.execute(&args, dir.path()).await;
+        assert!(result.output.contains("findme"));
     }
 }

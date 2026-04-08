@@ -144,8 +144,8 @@ impl<'a> Agent<'a> {
                     None
                 };
 
-                let output = if !authorized {
-                    "Permission denied by user".to_string()
+                let (output, tool_succeeded) = if !authorized {
+                    ("Permission denied by user".to_string(), false)
                 } else {
                     if MUTATING_TOOLS.contains(&tc.name.as_str()) {
                         had_mutation = true;
@@ -155,11 +155,11 @@ impl<'a> Agent<'a> {
                         turn_had_shell_exec = true;
                     }
                     match Tool::from_name(&tc.name) {
-                        Some(tool) => match tool.execute(&tc.arguments, &self.project_root).await {
-                            Ok(result) => result,
-                            Err(e) => format!("Error: {e}"),
-                        },
-                        None => format!("Unknown tool: {}", tc.name),
+                        Some(tool) => {
+                            let outcome = tool.execute(&tc.arguments, &self.project_root).await;
+                            (outcome.output, outcome.success)
+                        }
+                        None => (format!("Unknown tool: {}", tc.name), false),
                     }
                 };
 
@@ -170,7 +170,12 @@ impl<'a> Agent<'a> {
                 // Rewind processes all checkpoints in reverse order, so
                 // multiple edits to the same file are handled correctly
                 // without explicit dedup.
-                if let Some((canonical, pre)) = pre_snapshot
+                //
+                // Only emit checkpoint when the tool succeeded — failed tools,
+                // permission denials, and validation errors don't produce
+                // checkpoint entries.
+                if tool_succeeded
+                    && let Some((canonical, pre)) = pre_snapshot
                     && let Ok(post) = checkpoint::snapshot_post(&canonical, &self.project_root)
                 {
                     let cp = TranscriptEntry::checkpoint(
@@ -989,6 +994,59 @@ mod tests {
             .unwrap();
         drop(on_entry);
 
+        let entries = collected.lock().unwrap();
+        let checkpoint_entries: Vec<_> = entries
+            .iter()
+            .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
+            .collect();
+        assert_eq!(checkpoint_entries.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn no_checkpoint_when_tool_execution_fails() {
+        let repo = setup_git_repo();
+        let file_path = repo.path().join("test.txt");
+        // file_edit on a non-existent file will fail (old_string not found)
+
+        let mock = MockGrokApi::new(vec![
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_1".into(),
+                    name: "file_edit".into(),
+                    arguments: format!(
+                        r#"{{"path": "{}", "old_string": "nonexistent", "new_string": "x"}}"#,
+                        file_path.display()
+                    ),
+                }],
+                usage: None,
+            },
+            TurnResponse {
+                text: "Edit failed.".into(),
+                tool_calls: vec![],
+                usage: None,
+            },
+        ]);
+
+        let agent = Agent::new(&mock, repo.path());
+        let input = vec![json!({"role": "user", "content": "edit"})];
+        let (mut on_entry, collected) = collecting_entries();
+
+        agent
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut on_entry,
+            )
+            .await
+            .unwrap();
+        drop(on_entry);
+
+        // Tool failed — no checkpoint should be emitted
         let entries = collected.lock().unwrap();
         let checkpoint_entries: Vec<_> = entries
             .iter()
