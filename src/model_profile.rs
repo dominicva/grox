@@ -174,6 +174,7 @@ impl ModelProfile {
     }
 
     /// Estimate cost using full Usage details (cached tokens, reasoning tokens).
+    #[allow(dead_code)] // Will be used by Phase 4 cache display
     pub fn estimate_cost_from_usage(&self, usage: &crate::api::Usage) -> Option<f64> {
         if self.input_price == 0.0 && self.output_price == 0.0 {
             return None;

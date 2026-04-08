@@ -14,7 +14,7 @@ mod util;
 
 use agent::Agent;
 use anyhow::{Context, Result};
-use api::GrokClient;
+use api::{GrokClient, ReasoningEffort};
 use chrono::Utc;
 use clap::Parser;
 use colored::Colorize;
@@ -55,6 +55,10 @@ struct Cli {
     /// Resume a previous session (optionally specify session ID; defaults to most recent for this project)
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     resume: Option<String>,
+
+    /// Set initial reasoning effort (low or high). Only effective on models that support it.
+    #[arg(long, num_args = 0..=1, default_missing_value = "low")]
+    think: Option<String>,
 }
 
 #[tokio::main]
@@ -281,6 +285,34 @@ async fn main() -> Result<()> {
 
     let mut client = GrokClient::new(api_key, model);
 
+    // Set initial reasoning effort from --think flag
+    if let Some(ref think_arg) = cli.think {
+        let effort = match think_arg.as_str() {
+            "low" => Some(ReasoningEffort::Low),
+            "high" => Some(ReasoningEffort::High),
+            other => {
+                eprintln!(
+                    "{}",
+                    format!("  warning: unknown --think value '{other}', using 'low'").yellow()
+                );
+                Some(ReasoningEffort::Low)
+            }
+        };
+        let profile = model_profile::ModelProfile::for_model(client.model());
+        if profile.supports_reasoning_effort_control {
+            client.set_reasoning_effort(effort);
+        } else {
+            eprintln!(
+                "{}",
+                format!(
+                    "  warning: model {} does not support reasoning effort control, --think ignored",
+                    client.model()
+                )
+                .yellow()
+            );
+        }
+    }
+
     // Gather repo context
     let repo_ctx = repo_context::RepoContext::gather(&project_root);
     if repo_ctx.truncated {
@@ -355,6 +387,41 @@ async fn main() -> Result<()> {
             continue;
         }
 
+        if input == "/think" {
+            let profile = model_profile::ModelProfile::for_model(client.model());
+            if !profile.supports_reasoning_effort_control {
+                println!(
+                    "{}",
+                    format!(
+                        "  model {} does not support reasoning effort control",
+                        client.model()
+                    )
+                    .dimmed()
+                );
+                if profile.supports_reasoning() {
+                    println!(
+                        "{}",
+                        "  (this model has built-in reasoning that is always active)".dimmed()
+                    );
+                }
+            } else {
+                // Cycle: off -> low -> high -> off
+                let next = match client.reasoning_effort() {
+                    None => Some(ReasoningEffort::Low),
+                    Some(ReasoningEffort::Low) => Some(ReasoningEffort::High),
+                    Some(ReasoningEffort::High) => None,
+                };
+                client.set_reasoning_effort(next);
+                match next {
+                    Some(effort) => {
+                        println!("  reasoning effort: {}", effort.to_string().cyan())
+                    }
+                    None => println!("  reasoning effort: {}", "off".dimmed()),
+                }
+            }
+            continue;
+        }
+
         if input == "/status" {
             let profile = model_profile::ModelProfile::for_model(client.model());
             let estimated = assembler.estimate_tokens(&history);
@@ -372,6 +439,13 @@ async fn main() -> Result<()> {
             }
             if !caps.is_empty() {
                 println!("  caps:    {}", caps.join(", ").cyan());
+            }
+            if profile.supports_reasoning_effort_control {
+                let effort_str = match client.reasoning_effort() {
+                    Some(e) => e.to_string(),
+                    None => "off".to_string(),
+                };
+                println!("  think:   {}", effort_str.cyan());
             }
             println!("  project: {}", project_root.display().to_string().cyan());
             println!("  mode:    {}", format!("{permission_mode}").cyan());
@@ -808,6 +882,24 @@ async fn main() -> Result<()> {
             .await
         {
             Ok(result) => {
+                // Display reasoning indicators
+                if let Some(ref rc) = result.reasoning_content {
+                    // Plaintext reasoning (grok-3-mini): print as-is
+                    println!("{}", rc.dimmed());
+                }
+                if let Some(ref _er) = result.encrypted_reasoning {
+                    // Encrypted reasoning (grok-4): show token count indicator
+                    let token_count = result
+                        .usage
+                        .as_ref()
+                        .and_then(|u| u.reasoning_tokens)
+                        .unwrap_or(0);
+                    println!(
+                        "{}",
+                        format!("[thinking... {} tokens]", token_count).dimmed()
+                    );
+                }
+
                 if result.text.is_empty() {
                     println!("{}", "(no response from model)".dimmed());
                 }

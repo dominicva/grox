@@ -314,17 +314,25 @@ impl GrokApi for GrokClient {
                                 });
                             } else if item_type == "reasoning" {
                                 // Reasoning output: extract plaintext or encrypted content
-                                if let Some(content_arr) = item.get("content").and_then(|c| c.as_array()) {
+                                if let Some(content_arr) =
+                                    item.get("content").and_then(|c| c.as_array())
+                                {
                                     for block in content_arr {
-                                        let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                        let block_type = block
+                                            .get("type")
+                                            .and_then(|t| t.as_str())
+                                            .unwrap_or("");
                                         if block_type == "reasoning_text" {
-                                            if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                                            if let Some(t) =
+                                                block.get("text").and_then(|v| v.as_str())
+                                            {
                                                 reasoning_content = Some(t.to_string());
                                             }
-                                        } else if block_type == "reasoning_encrypted" {
-                                            if let Some(data) = block.get("data").and_then(|v| v.as_str()) {
-                                                encrypted_reasoning = Some(data.to_string());
-                                            }
+                                        } else if block_type == "reasoning_encrypted"
+                                            && let Some(data) =
+                                                block.get("data").and_then(|v| v.as_str())
+                                        {
+                                            encrypted_reasoning = Some(data.to_string());
                                         }
                                     }
                                 }

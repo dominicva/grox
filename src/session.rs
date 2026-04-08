@@ -92,7 +92,8 @@ impl TranscriptEntry {
         }
     }
 
-    /// Create an AssistantMessage with auto-calculated token estimate.
+    /// Create an AssistantMessage with auto-calculated token estimate (no reasoning).
+    #[allow(dead_code)] // Used in tests and compaction helpers
     pub fn assistant_message(content: impl Into<String>) -> Self {
         let content = content.into();
         let token_estimate = content.len() / 4;
@@ -601,11 +602,8 @@ mod tests {
     #[test]
     fn assistant_message_with_reasoning_includes_payload_in_token_estimate() {
         let plain = TranscriptEntry::assistant_message("hello");
-        let with_reasoning = TranscriptEntry::assistant_message_with_reasoning(
-            "hello",
-            Some("x".repeat(400)),
-            None,
-        );
+        let with_reasoning =
+            TranscriptEntry::assistant_message_with_reasoning("hello", Some("x".repeat(400)), None);
         assert!(with_reasoning.token_estimate() > plain.token_estimate());
         // "hello" (5) + reasoning (400) = 405 / 4 = 101
         assert_eq!(with_reasoning.token_estimate(), 405 / 4);
