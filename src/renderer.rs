@@ -1,4 +1,6 @@
 use std::io::{Write, stdout};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use colored::Colorize;
 use syntect::easy::HighlightLines;
@@ -42,6 +44,7 @@ pub trait Renderer: Send {
 /// Terminal renderer that writes to stdout with ANSI colors and syntax highlighting.
 pub struct TerminalRenderer {
     first_token: bool,
+    thinking_expanded: Arc<AtomicBool>,
     ss: SyntaxSet,
     ts: ThemeSet,
 }
@@ -50,6 +53,7 @@ impl TerminalRenderer {
     pub fn new() -> Self {
         Self {
             first_token: true,
+            thinking_expanded: Arc::new(AtomicBool::new(true)),
             ss: SyntaxSet::load_defaults_newlines(),
             ts: ThemeSet::load_defaults(),
         }
@@ -60,6 +64,20 @@ impl TerminalRenderer {
     /// persists across turns.
     pub fn begin_turn(&mut self) {
         self.first_token = true;
+    }
+
+    /// Get a shared handle to the thinking-expanded flag.
+    /// Used by the Ctrl+T keybinding handler.
+    pub fn thinking_expanded_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.thinking_expanded)
+    }
+
+    /// Toggle thinking display between expanded and collapsed.
+    /// Returns the new state (true = expanded).
+    pub fn toggle_thinking_display(&self) -> bool {
+        let prev = self.thinking_expanded.load(Ordering::Relaxed);
+        self.thinking_expanded.store(!prev, Ordering::Relaxed);
+        !prev
     }
 }
 
@@ -129,12 +147,29 @@ impl Renderer for TerminalRenderer {
         encrypted: Option<&str>,
         reasoning_tokens: Option<u64>,
     ) {
+        let expanded = self.thinking_expanded.load(Ordering::Relaxed);
+
         if let Some(rc) = plaintext {
-            println!("{rc}");
+            let token_count = reasoning_tokens.unwrap_or(0);
+            if expanded {
+                println!("\n{}", "Thinking".bold().dimmed());
+                for line in rc.lines() {
+                    println!("{}", format!("  {line}").dimmed());
+                }
+                println!();
+            } else {
+                println!(
+                    "{}",
+                    format!("Thinking [{token_count} tokens]").dimmed()
+                );
+            }
         }
         if encrypted.is_some() {
             let token_count = reasoning_tokens.unwrap_or(0);
-            println!("{}", format!("[thinking... {token_count} tokens]").dimmed());
+            println!(
+                "{}",
+                format!("[thinking... {token_count} tokens]").dimmed()
+            );
         }
     }
 }
@@ -196,6 +231,7 @@ pub struct RecordingRenderer {
     pub tool_results: Vec<(String, String)>,
     pub reasoning_calls: Vec<(Option<String>, Option<String>, Option<u64>)>,
     pub auth_warnings: Vec<String>,
+    pub thinking_expanded: bool,
 }
 
 #[cfg(test)]
@@ -207,6 +243,7 @@ impl RecordingRenderer {
             tool_results: Vec::new(),
             reasoning_calls: Vec::new(),
             auth_warnings: Vec::new(),
+            thinking_expanded: true,
         }
     }
 }
@@ -347,6 +384,45 @@ mod tests {
         }
         let mut r = MinimalRenderer;
         r.on_auth_warning("should not panic");
+    }
+
+    // --- summarize_tool_call ---
+
+    // --- Thinking display state ---
+
+    #[test]
+    fn thinking_expanded_by_default() {
+        let r = TerminalRenderer::new();
+        assert!(r.thinking_expanded.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn toggle_thinking_display_cycles() {
+        let r = TerminalRenderer::new();
+        assert!(r.thinking_expanded.load(Ordering::Relaxed));
+        let new_state = r.toggle_thinking_display();
+        assert!(!new_state);
+        assert!(!r.thinking_expanded.load(Ordering::Relaxed));
+        let new_state = r.toggle_thinking_display();
+        assert!(new_state);
+        assert!(r.thinking_expanded.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn thinking_expanded_handle_shares_state() {
+        let r = TerminalRenderer::new();
+        let handle = r.thinking_expanded_handle();
+        assert!(handle.load(Ordering::Relaxed));
+        r.toggle_thinking_display();
+        assert!(!handle.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn begin_turn_preserves_thinking_state() {
+        let mut r = TerminalRenderer::new();
+        r.toggle_thinking_display(); // collapsed
+        r.begin_turn();
+        assert!(!r.thinking_expanded.load(Ordering::Relaxed));
     }
 
     // --- summarize_tool_call ---
