@@ -49,7 +49,7 @@ impl<'a> Agent<'a> {
     ///
     /// `on_context_refresh` is called after mutating tools execute. It should return
     /// a fresh system prompt (with updated repo context) to replace the existing one.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub async fn run(
         &self,
         input: Vec<Value>,
@@ -59,6 +59,7 @@ impl<'a> Agent<'a> {
         on_authorize: &mut (dyn FnMut(&str, &str) -> bool + Send),
         on_context_refresh: &mut (dyn FnMut() -> Value + Send),
         on_entry: &mut (dyn FnMut(&TranscriptEntry) -> Result<()> + Send),
+        on_reasoning: &mut (dyn FnMut(Option<&str>, Option<&str>, Option<u64>) + Send),
     ) -> Result<AgentResult> {
         let mut messages = input;
         let mut final_text = String::new();
@@ -97,6 +98,16 @@ impl<'a> Agent<'a> {
 
             final_text = response.text.clone();
 
+            // Notify caller of reasoning from every response (intermediate and final)
+            if response.reasoning_content.is_some() || response.encrypted_reasoning.is_some() {
+                let reasoning_tokens = response.usage.as_ref().and_then(|u| u.reasoning_tokens);
+                on_reasoning(
+                    response.reasoning_content.as_deref(),
+                    response.encrypted_reasoning.as_deref(),
+                    reasoning_tokens,
+                );
+            }
+
             if response.tool_calls.is_empty() {
                 // Final assistant message — persist with reasoning payloads
                 if !final_text.is_empty() {
@@ -110,19 +121,29 @@ impl<'a> Agent<'a> {
                 return Ok(AgentResult {
                     text: final_text,
                     usage: cumulative_usage,
-                    reasoning_content: response.reasoning_content,
-                    encrypted_reasoning: response.encrypted_reasoning,
                 });
             }
 
-            // Intermediate assistant message (may be empty if model went straight to tools)
-            if !response.text.is_empty() {
+            // Intermediate assistant message (may be empty if model went straight to tools).
+            // Persist reasoning payloads AND include them in the live messages buffer
+            // so the next send_turn round-trips reasoning correctly.
+            let has_content = !response.text.is_empty()
+                || response.reasoning_content.is_some()
+                || response.encrypted_reasoning.is_some();
+            if has_content {
                 let entry = TranscriptEntry::assistant_message_with_reasoning(
                     &response.text,
                     response.reasoning_content.clone(),
                     response.encrypted_reasoning.clone(),
                 );
-                messages.push(json!({"role": "assistant", "content": response.text}));
+                let mut msg = json!({"role": "assistant", "content": response.text});
+                if let Some(ref rc) = response.reasoning_content {
+                    msg["reasoning_content"] = serde_json::Value::String(rc.clone());
+                }
+                if let Some(ref er) = response.encrypted_reasoning {
+                    msg["encrypted_reasoning"] = serde_json::Value::String(er.clone());
+                }
+                messages.push(msg);
                 on_entry(&entry)?;
             }
 
@@ -233,8 +254,6 @@ impl<'a> Agent<'a> {
         Ok(AgentResult {
             text: final_text,
             usage: cumulative_usage,
-            reasoning_content: None,
-            encrypted_reasoning: None,
         })
     }
 }
@@ -243,8 +262,6 @@ impl<'a> Agent<'a> {
 pub struct AgentResult {
     pub text: String,
     pub usage: Option<crate::api::Usage>,
-    pub reasoning_content: Option<String>,
-    pub encrypted_reasoning: Option<String>,
 }
 
 #[cfg(test)]
@@ -263,6 +280,7 @@ mod tests {
     fn no_refresh() -> Value {
         json!({"role": "system", "content": "test"})
     }
+    fn noop_reasoning(_: Option<&str>, _: Option<&str>, _: Option<u64>) {}
     fn noop_entry(_: &TranscriptEntry) -> Result<()> {
         Ok(())
     }
@@ -323,6 +341,7 @@ mod tests {
                 &mut allow_all,
                 &mut no_refresh,
                 &mut noop_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -365,6 +384,7 @@ mod tests {
                 &mut allow_all,
                 &mut no_refresh,
                 &mut noop_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -394,6 +414,7 @@ mod tests {
                 &mut allow_all,
                 &mut no_refresh,
                 &mut noop_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -430,6 +451,7 @@ mod tests {
                 &mut allow_all,
                 &mut no_refresh,
                 &mut noop_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -472,6 +494,7 @@ mod tests {
                 &mut allow_all,
                 &mut no_refresh,
                 &mut noop_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -516,6 +539,7 @@ mod tests {
                 &mut deny_all,
                 &mut no_refresh,
                 &mut noop_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -548,6 +572,7 @@ mod tests {
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -603,6 +628,7 @@ mod tests {
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -645,6 +671,7 @@ mod tests {
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -700,6 +727,7 @@ mod tests {
                 &mut allow_all,
                 &mut no_refresh,
                 &mut noop_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -759,6 +787,7 @@ mod tests {
                     json!({"role": "system", "content": "refreshed"})
                 },
                 &mut noop_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -813,6 +842,7 @@ mod tests {
                     json!({"role": "system", "content": "refreshed"})
                 },
                 &mut noop_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -865,6 +895,7 @@ mod tests {
                     json!({"role": "system", "content": "refreshed"})
                 },
                 &mut noop_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -939,6 +970,7 @@ mod tests {
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1013,6 +1045,7 @@ mod tests {
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1074,6 +1107,7 @@ mod tests {
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1130,6 +1164,7 @@ mod tests {
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1184,6 +1219,7 @@ mod tests {
                 &mut deny_all,
                 &mut no_refresh,
                 &mut on_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1242,6 +1278,7 @@ mod tests {
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1312,6 +1349,7 @@ mod tests {
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1404,6 +1442,7 @@ mod tests {
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1474,6 +1513,7 @@ mod tests {
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1558,6 +1598,7 @@ mod tests {
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1640,6 +1681,7 @@ mod tests {
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1733,6 +1775,7 @@ mod tests {
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1806,6 +1849,7 @@ mod tests {
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
+                &mut noop_reasoning,
             )
             .await;
         drop(on_entry);
@@ -1917,6 +1961,7 @@ mod tests {
                 &mut allow_all,
                 &mut no_refresh,
                 &mut noop_entry,
+                &mut noop_reasoning,
             )
             .await
             .unwrap();

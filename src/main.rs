@@ -878,28 +878,23 @@ async fn main() -> Result<()> {
                     history.push(entry.clone());
                     Ok(())
                 },
+                &mut |plaintext: Option<&str>,
+                      encrypted: Option<&str>,
+                      reasoning_tokens: Option<u64>| {
+                    // Display reasoning from every response (intermediate and final)
+                    if let Some(rc) = plaintext {
+                        // Plaintext reasoning (grok-3-mini): print as-is per 3A spec
+                        println!("{rc}");
+                    }
+                    if encrypted.is_some() {
+                        let token_count = reasoning_tokens.unwrap_or(0);
+                        println!("{}", format!("[thinking... {token_count} tokens]").dimmed());
+                    }
+                },
             )
             .await
         {
             Ok(result) => {
-                // Display reasoning indicators
-                if let Some(ref rc) = result.reasoning_content {
-                    // Plaintext reasoning (grok-3-mini): print as-is
-                    println!("{}", rc.dimmed());
-                }
-                if let Some(ref _er) = result.encrypted_reasoning {
-                    // Encrypted reasoning (grok-4): show token count indicator
-                    let token_count = result
-                        .usage
-                        .as_ref()
-                        .and_then(|u| u.reasoning_tokens)
-                        .unwrap_or(0);
-                    println!(
-                        "{}",
-                        format!("[thinking... {} tokens]", token_count).dimmed()
-                    );
-                }
-
                 if result.text.is_empty() {
                     println!("{}", "(no response from model)".dimmed());
                 }
@@ -951,9 +946,10 @@ async fn main() -> Result<()> {
 }
 
 /// Best-effort cost estimate. Returns empty string if pricing is unknown.
+/// Uses full usage details (cached tokens, reasoning tokens) when available.
 fn estimate_cost(model: &str, usage: &api::Usage) -> String {
     let profile = model_profile::ModelProfile::for_model(model);
-    match profile.estimate_cost(usage.input_tokens, usage.output_tokens) {
+    match profile.estimate_cost_from_usage(usage) {
         Some(cost) => format!("  (~${cost:.4})"),
         None => String::new(),
     }
