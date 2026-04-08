@@ -4,6 +4,7 @@ mod checkpoint;
 mod command_registry;
 mod compaction;
 mod context_assembler;
+mod file_index;
 mod model_profile;
 mod permissions;
 mod prompt;
@@ -363,11 +364,13 @@ async fn main() -> Result<()> {
 
     let mut assembler = ContextAssembler::new(system_prompt);
 
+    let file_idx = file_index::FileIndex::build(&project_root);
+
     let config = rustyline::Config::builder()
         .completion_type(rustyline::config::CompletionType::List)
         .build();
     let mut rl = Editor::with_config(config)?;
-    rl.set_helper(Some(GroxHelper));
+    rl.set_helper(Some(GroxHelper::with_file_index(file_idx.clone())));
     let mut term_renderer = renderer::TerminalRenderer::new();
 
     // Bind Ctrl+T to toggle thinking display
@@ -870,7 +873,8 @@ async fn main() -> Result<()> {
                 &mut term_renderer,
                 &mut |name: &str, args: &str| session_perms.authorize(name, args),
                 &mut || {
-                    // Refresh repo context after mutating tools
+                    // Refresh repo context and file index after mutating tools
+                    file_idx.refresh();
                     let fresh_ctx = repo_context::RepoContext::gather(&project_root);
                     let fresh_ctx_text = if fresh_ctx.text.is_empty() {
                         None

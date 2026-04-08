@@ -9,6 +9,8 @@ use rustyline::hint::{Hint, Hinter};
 use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
 
+use crate::file_index::FileIndex;
+
 /// Identifies which slash command was matched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
@@ -158,8 +160,23 @@ impl CommandRegistry {
 // Rustyline helper: slash-command completion and ghost-text hints
 // ---------------------------------------------------------------------------
 
-/// Rustyline helper providing slash-command completion and hints.
-pub struct GroxHelper;
+/// Rustyline helper providing slash-command completion, file path completion,
+/// and ghost-text hints.
+pub struct GroxHelper {
+    pub file_index: Option<FileIndex>,
+}
+
+impl GroxHelper {
+    pub fn new() -> Self {
+        Self { file_index: None }
+    }
+
+    pub fn with_file_index(file_index: FileIndex) -> Self {
+        Self {
+            file_index: Some(file_index),
+        }
+    }
+}
 
 impl Helper for GroxHelper {}
 
@@ -172,55 +189,70 @@ impl Completer for GroxHelper {
         pos: usize,
         _ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        // Only complete when cursor is at end of line on a slash command,
-        // and there's no whitespace (still typing command name, not args).
-        if pos != line.len() || pos < 1 || !line.starts_with('/') {
-            return Ok((pos, vec![]));
-        }
-        if line[1..].contains(char::is_whitespace) {
+        if pos != line.len() || pos < 1 {
             return Ok((pos, vec![]));
         }
 
-        let prefix = &line[1..];
-        let matches: Vec<&CommandSpec> = if prefix.is_empty() {
-            CommandRegistry::all().iter().collect()
-        } else {
-            CommandRegistry::prefix_matches(prefix)
-        };
+        // --- Slash command completion ---
+        if line.starts_with('/') && !line[1..].contains(char::is_whitespace) {
+            let prefix = &line[1..];
+            let matches: Vec<&CommandSpec> = if prefix.is_empty() {
+                CommandRegistry::all().iter().collect()
+            } else {
+                CommandRegistry::prefix_matches(prefix)
+            };
 
-        let pairs = matches
-            .into_iter()
-            .flat_map(|cmd| {
-                let arg_hint = match cmd.arg_spec {
-                    ArgSpec::Optional(label) => format!(" [{label}]"),
-                    ArgSpec::None => String::new(),
-                };
-                // Yield the canonical name entry.
-                let mut entries = vec![];
-                if cmd.name.starts_with(prefix) || prefix.is_empty() {
-                    entries.push(Pair {
-                        display: format!("/{}{} — {}", cmd.name, arg_hint, cmd.description),
-                        replacement: format!("/{}", cmd.name),
-                    });
-                }
-                // Also yield matching aliases so /ex Tab completes to /exit.
-                for alias in cmd.aliases {
-                    if alias.starts_with(prefix) {
+            let pairs = matches
+                .into_iter()
+                .flat_map(|cmd| {
+                    let arg_hint = match cmd.arg_spec {
+                        ArgSpec::Optional(label) => format!(" [{label}]"),
+                        ArgSpec::None => String::new(),
+                    };
+                    let mut entries = vec![];
+                    if cmd.name.starts_with(prefix) || prefix.is_empty() {
                         entries.push(Pair {
                             display: format!(
-                                "/{} (alias for /{}){} — {}",
-                                alias, cmd.name, arg_hint, cmd.description
+                                "/{}{} — {}",
+                                cmd.name, arg_hint, cmd.description
                             ),
-                            replacement: format!("/{alias}"),
+                            replacement: format!("/{}", cmd.name),
                         });
                     }
-                }
-                entries
-            })
-            .collect();
+                    for alias in cmd.aliases {
+                        if alias.starts_with(prefix) {
+                            entries.push(Pair {
+                                display: format!(
+                                    "/{} (alias for /{}){} — {}",
+                                    alias, cmd.name, arg_hint, cmd.description
+                                ),
+                                replacement: format!("/{alias}"),
+                            });
+                        }
+                    }
+                    entries
+                })
+                .collect();
 
-        // Replace from position 0 (includes the `/`).
-        Ok((0, pairs))
+            return Ok((0, pairs));
+        }
+
+        // --- File path completion ---
+        if let Some(ref file_index) = self.file_index {
+            if let Some((token_start, token)) = extract_path_token(line, pos) {
+                let completions = file_index.completions(token);
+                let pairs = completions
+                    .into_iter()
+                    .map(|(display, replacement)| Pair {
+                        display,
+                        replacement,
+                    })
+                    .collect();
+                return Ok((token_start, pairs));
+            }
+        }
+
+        Ok((pos, vec![]))
     }
 }
 
@@ -284,6 +316,50 @@ impl Hint for CommandHint {
         // Right-arrow inserts just the command suffix, not the description.
         Some(&self.completion)
     }
+}
+
+// ---------------------------------------------------------------------------
+// File path token extraction
+// ---------------------------------------------------------------------------
+
+/// Path trigger prefixes that activate file completion.
+const PATH_TRIGGERS: &[&str] = &["@", "./", "../", "~/"];
+
+/// Extract the path-like token at the cursor position.
+///
+/// Returns `(token_start_position, token_text)` if the text at the cursor
+/// looks like a file path (starts with `@`, `./`, `../`, `~`, or contains `/`).
+fn extract_path_token(line: &str, pos: usize) -> Option<(usize, &str)> {
+    let before_cursor = &line[..pos];
+
+    // Find the start of the current token (scan backwards for whitespace)
+    let token_start = before_cursor
+        .rfind(char::is_whitespace)
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let token = &before_cursor[token_start..];
+
+    if token.is_empty() {
+        return None;
+    }
+
+    // Check if the token starts with a path trigger
+    for trigger in PATH_TRIGGERS {
+        if token.starts_with(trigger) {
+            // For @, strip the prefix and adjust start position
+            if *trigger == "@" {
+                return Some((token_start + 1, &token[1..]));
+            }
+            return Some((token_start, token));
+        }
+    }
+
+    // Also trigger on tokens containing `/` (e.g. `src/main`)
+    if token.contains('/') {
+        return Some((token_start, token));
+    }
+
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -466,5 +542,59 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted);
+    }
+
+    // --- File path token extraction ---
+
+    #[test]
+    fn extract_at_prefix() {
+        let (start, token) = extract_path_token("look at @src/main", 17).unwrap();
+        assert_eq!(start, 9); // after the @
+        assert_eq!(token, "src/main");
+    }
+
+    #[test]
+    fn extract_dot_slash() {
+        let (start, token) = extract_path_token("edit ./src/lib.rs", 17).unwrap();
+        assert_eq!(start, 5);
+        assert_eq!(token, "./src/lib.rs");
+    }
+
+    #[test]
+    fn extract_dot_dot_slash() {
+        let (start, token) = extract_path_token("read ../file.txt", 16).unwrap();
+        assert_eq!(start, 5);
+        assert_eq!(token, "../file.txt");
+    }
+
+    #[test]
+    fn extract_tilde_prefix() {
+        let (start, token) = extract_path_token("check ~/config", 14).unwrap();
+        assert_eq!(start, 6);
+        assert_eq!(token, "~/config");
+    }
+
+    #[test]
+    fn extract_slash_in_token() {
+        let (start, token) = extract_path_token("open src/main.rs", 16).unwrap();
+        assert_eq!(start, 5);
+        assert_eq!(token, "src/main.rs");
+    }
+
+    #[test]
+    fn extract_no_path_token() {
+        assert!(extract_path_token("hello world", 11).is_none());
+    }
+
+    #[test]
+    fn extract_empty_line() {
+        assert!(extract_path_token("", 0).is_none());
+    }
+
+    #[test]
+    fn extract_at_alone() {
+        // @ with nothing after — empty token after stripping
+        let result = extract_path_token("look at @", 9);
+        assert!(result.is_none() || result.unwrap().1.is_empty());
     }
 }
