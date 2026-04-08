@@ -1065,3 +1065,48 @@ fn summarize_tool_call(name: &str, args: &str) -> String {
         _ => args.to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_token_count_below_1k() {
+        assert_eq!(format_token_count(0), "0");
+        assert_eq!(format_token_count(1), "1");
+        assert_eq!(format_token_count(999), "999");
+    }
+
+    #[test]
+    fn format_token_count_at_and_above_1k() {
+        assert_eq!(format_token_count(1_000), "1.0k");
+        assert_eq!(format_token_count(1_234), "1.2k");
+        assert_eq!(format_token_count(12_345), "12.3k");
+        assert_eq!(format_token_count(100_000), "100.0k");
+    }
+
+    #[test]
+    fn estimate_cost_known_model_with_cached_tokens() {
+        let usage = api::Usage {
+            input_tokens: 1_000,
+            output_tokens: 500,
+            cached_input_tokens: Some(400),
+            reasoning_tokens: None,
+        };
+        let cost_str = estimate_cost("grok-3", &usage);
+        assert!(cost_str.starts_with("  (~$"), "got: {cost_str}");
+        assert!(!cost_str.is_empty());
+    }
+
+    #[test]
+    fn estimate_cost_unknown_model_returns_empty() {
+        let usage = api::Usage {
+            input_tokens: 1_000,
+            output_tokens: 500,
+            cached_input_tokens: None,
+            reasoning_tokens: None,
+        };
+        let cost_str = estimate_cost("unknown-model", &usage);
+        assert_eq!(cost_str, "");
+    }
+}
