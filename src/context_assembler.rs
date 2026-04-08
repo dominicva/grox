@@ -82,11 +82,25 @@ impl ContextAssembler {
                         "content": content,
                     }));
                 }
-                TranscriptEntry::AssistantMessage { content, .. } => {
-                    messages.push(json!({
+                TranscriptEntry::AssistantMessage {
+                    content,
+                    reasoning_content,
+                    encrypted_reasoning,
+                    ..
+                } => {
+                    let mut msg = json!({
                         "role": "assistant",
                         "content": content,
-                    }));
+                    });
+                    // Round-trip reasoning payloads so retained turns preserve their
+                    // reasoning when resent to the API.
+                    if let Some(rc) = reasoning_content {
+                        msg["reasoning_content"] = Value::String(rc.clone());
+                    }
+                    if let Some(er) = encrypted_reasoning {
+                        msg["encrypted_reasoning"] = Value::String(er.clone());
+                    }
+                    messages.push(msg);
                 }
                 TranscriptEntry::ToolCall {
                     call_id,
@@ -450,5 +464,47 @@ mod tests {
             estimate,
             overhead + latest_summary_tokens + wrapper_tokens + user_tokens
         );
+    }
+
+    #[test]
+    fn reasoning_content_round_tripped_in_assistant_message() {
+        let assembler = ContextAssembler::new(test_system_prompt());
+        let entries = vec![TranscriptEntry::assistant_message_with_reasoning(
+            "visible text",
+            Some("thinking...".to_string()),
+            None,
+        )];
+        let messages = assembler.build_messages(&entries);
+
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"], "visible text");
+        assert_eq!(messages[1]["reasoning_content"], "thinking...");
+        assert!(messages[1].get("encrypted_reasoning").is_none());
+    }
+
+    #[test]
+    fn encrypted_reasoning_round_tripped_in_assistant_message() {
+        let assembler = ContextAssembler::new(test_system_prompt());
+        let entries = vec![TranscriptEntry::assistant_message_with_reasoning(
+            "answer",
+            None,
+            Some("encrypted_blob_data".to_string()),
+        )];
+        let messages = assembler.build_messages(&entries);
+
+        assert_eq!(messages[1]["content"], "answer");
+        assert!(messages[1].get("reasoning_content").is_none());
+        assert_eq!(messages[1]["encrypted_reasoning"], "encrypted_blob_data");
+    }
+
+    #[test]
+    fn no_reasoning_fields_when_none() {
+        let assembler = ContextAssembler::new(test_system_prompt());
+        let entries = vec![TranscriptEntry::assistant_message("plain text")];
+        let messages = assembler.build_messages(&entries);
+
+        assert_eq!(messages[1]["content"], "plain text");
+        assert!(messages[1].get("reasoning_content").is_none());
+        assert!(messages[1].get("encrypted_reasoning").is_none());
     }
 }

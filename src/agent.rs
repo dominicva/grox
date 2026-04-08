@@ -98,20 +98,30 @@ impl<'a> Agent<'a> {
             final_text = response.text.clone();
 
             if response.tool_calls.is_empty() {
-                // Final assistant message
+                // Final assistant message — persist with reasoning payloads
                 if !final_text.is_empty() {
-                    let entry = TranscriptEntry::assistant_message(&final_text);
+                    let entry = TranscriptEntry::assistant_message_with_reasoning(
+                        &final_text,
+                        response.reasoning_content.clone(),
+                        response.encrypted_reasoning.clone(),
+                    );
                     on_entry(&entry)?;
                 }
                 return Ok(AgentResult {
                     text: final_text,
                     usage: cumulative_usage,
+                    reasoning_content: response.reasoning_content,
+                    encrypted_reasoning: response.encrypted_reasoning,
                 });
             }
 
             // Intermediate assistant message (may be empty if model went straight to tools)
             if !response.text.is_empty() {
-                let entry = TranscriptEntry::assistant_message(&response.text);
+                let entry = TranscriptEntry::assistant_message_with_reasoning(
+                    &response.text,
+                    response.reasoning_content.clone(),
+                    response.encrypted_reasoning.clone(),
+                );
                 messages.push(json!({"role": "assistant", "content": response.text}));
                 on_entry(&entry)?;
             }
@@ -223,6 +233,8 @@ impl<'a> Agent<'a> {
         Ok(AgentResult {
             text: final_text,
             usage: cumulative_usage,
+            reasoning_content: None,
+            encrypted_reasoning: None,
         })
     }
 }
@@ -231,6 +243,8 @@ impl<'a> Agent<'a> {
 pub struct AgentResult {
     pub text: String,
     pub usage: Option<crate::api::Usage>,
+    pub reasoning_content: Option<String>,
+    pub encrypted_reasoning: Option<String>,
 }
 
 #[cfg(test)]
