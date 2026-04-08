@@ -1,0 +1,4 @@
+{"event": "response.output_item.done", "data": {"type": "response.output_item.done", "item": {"type": "reasoning", "content": [{"type": "reasoning_encrypted", "data": "eyJhbGciOiJSUzI1NiJ9.dGhpbmtpbmcgYWJvdXQgdGhlIHByb2JsZW0.c2lnbmF0dXJl"}]}}}
+{"event": "response.output_text.delta", "data": {"type": "response.output_text.delta", "delta": "I've analyzed the issue."}}
+{"event": "response.output_item.done", "data": {"type": "response.output_item.done", "item": {"type": "function_call", "call_id": "call_def456", "name": "file_edit", "arguments": "{\"path\": \"src/lib.rs\", \"old_string\": \"old code\", \"new_string\": \"new code\"}"}}}
+{"event": "response.completed", "data": {"type": "response.completed", "response": {"usage": {"input_tokens": 3200, "output_tokens": 890, "input_tokens_details": {}, "output_tokens_details": {"reasoning_tokens": 512}}}}}

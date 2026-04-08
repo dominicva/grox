@@ -531,6 +531,200 @@ mod tests {
             assert!(!is_model_rejection(body), "{body} should not match");
         }
     }
+
+    // --- parse_sse_event unit tests ---
+
+    #[test]
+    fn parse_done_marker() {
+        let event = parse_sse_event("", "[DONE]").unwrap();
+        assert_eq!(event, ParsedEvent::Done);
+    }
+
+    #[test]
+    fn parse_text_delta() {
+        let data = r#"{"type":"response.output_text.delta","delta":"hello world"}"#;
+        let event = parse_sse_event("response.output_text.delta", data).unwrap();
+        assert_eq!(event, ParsedEvent::TextDelta("hello world".to_string()));
+    }
+
+    #[test]
+    fn parse_text_delta_from_json_type_field() {
+        // When SSE event field is empty, falls back to JSON type field
+        let data = r#"{"type":"response.output_text.delta","delta":"fallback"}"#;
+        let event = parse_sse_event("", data).unwrap();
+        assert_eq!(event, ParsedEvent::TextDelta("fallback".to_string()));
+    }
+
+    #[test]
+    fn parse_error_event() {
+        let data = r#"{"type":"error","message":"rate limit exceeded"}"#;
+        let event = parse_sse_event("error", data).unwrap();
+        assert_eq!(
+            event,
+            ParsedEvent::Error("rate limit exceeded".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_unknown_event_type() {
+        let data = r#"{"type":"response.created","id":"resp_001"}"#;
+        let event = parse_sse_event("response.created", data).unwrap();
+        assert_eq!(event, ParsedEvent::Unknown);
+    }
+
+    #[test]
+    fn parse_invalid_json_errors() {
+        let result = parse_sse_event("", "not valid json");
+        assert!(result.is_err());
+    }
+
+    // --- Contract tests from fixture files ---
+
+    /// Load a fixture file and replay each line through parse_sse_event,
+    /// collecting the parsed events.
+    fn replay_fixture(filename: &str) -> Vec<ParsedEvent> {
+        let fixture_path = format!(
+            "{}/src/fixtures/{filename}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let content = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("Failed to read fixture {fixture_path}: {e}"));
+
+        let mut events = Vec::new();
+        for line in content.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let record: Value = serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("Bad fixture JSON: {e}\nline: {line}"));
+            let event_name = record["event"].as_str().unwrap_or("");
+            let data = serde_json::to_string(&record["data"]).unwrap();
+            let parsed = parse_sse_event(event_name, &data).unwrap();
+            events.push(parsed);
+        }
+        events
+    }
+
+    #[test]
+    fn contract_happy_path_text_and_tool_call() {
+        let events = replay_fixture("happy_path_text_and_tool_call.jsonl");
+        assert_eq!(events.len(), 4);
+
+        // First two events: text deltas
+        assert_eq!(events[0], ParsedEvent::TextDelta("I'll read ".to_string()));
+        assert_eq!(
+            events[1],
+            ParsedEvent::TextDelta("the file for you.".to_string())
+        );
+
+        // Third event: tool call
+        match &events[2] {
+            ParsedEvent::ToolCall(tc) => {
+                assert_eq!(tc.call_id, "call_abc123");
+                assert_eq!(tc.name, "file_read");
+                let args: Value = serde_json::from_str(&tc.arguments).unwrap();
+                assert_eq!(args["path"], "src/main.rs");
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        }
+
+        // Fourth event: completed with usage
+        match &events[3] {
+            ParsedEvent::Completed(u) => {
+                assert_eq!(u.input_tokens, 1250);
+                assert_eq!(u.output_tokens, 340);
+                assert_eq!(u.cached_input_tokens, Some(800));
+                assert_eq!(u.reasoning_tokens, Some(0));
+            }
+            other => panic!("Expected Completed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn contract_reasoning_response() {
+        let events = replay_fixture("reasoning_response.jsonl");
+        assert_eq!(events.len(), 4);
+
+        // First event: plaintext reasoning
+        match &events[0] {
+            ParsedEvent::Reasoning {
+                plaintext,
+                encrypted,
+            } => {
+                assert!(plaintext.is_some());
+                assert!(
+                    plaintext.as_deref().unwrap().contains("refactor the function")
+                );
+                assert!(encrypted.is_none());
+            }
+            other => panic!("Expected Reasoning, got {other:?}"),
+        }
+
+        // Text deltas
+        assert_eq!(events[1], ParsedEvent::TextDelta("Here's my ".to_string()));
+        assert_eq!(
+            events[2],
+            ParsedEvent::TextDelta("analysis of the code.".to_string())
+        );
+
+        // Completed with reasoning tokens
+        match &events[3] {
+            ParsedEvent::Completed(u) => {
+                assert_eq!(u.input_tokens, 2100);
+                assert_eq!(u.output_tokens, 580);
+                assert_eq!(u.cached_input_tokens, Some(1500));
+                assert_eq!(u.reasoning_tokens, Some(245));
+            }
+            other => panic!("Expected Completed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn contract_encrypted_reasoning_with_tool_call() {
+        let events = replay_fixture("encrypted_reasoning_response.jsonl");
+        assert_eq!(events.len(), 4);
+
+        // First event: encrypted reasoning
+        match &events[0] {
+            ParsedEvent::Reasoning {
+                plaintext,
+                encrypted,
+            } => {
+                assert!(plaintext.is_none());
+                assert!(encrypted.is_some());
+                assert!(encrypted.as_deref().unwrap().starts_with("eyJhbGci"));
+            }
+            other => panic!("Expected Reasoning, got {other:?}"),
+        }
+
+        // Text delta
+        assert_eq!(
+            events[1],
+            ParsedEvent::TextDelta("I've analyzed the issue.".to_string())
+        );
+
+        // Tool call
+        match &events[2] {
+            ParsedEvent::ToolCall(tc) => {
+                assert_eq!(tc.call_id, "call_def456");
+                assert_eq!(tc.name, "file_edit");
+                let args: Value = serde_json::from_str(&tc.arguments).unwrap();
+                assert_eq!(args["path"], "src/lib.rs");
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        }
+
+        // Completed — no cached_tokens in this fixture (empty details object)
+        match &events[3] {
+            ParsedEvent::Completed(u) => {
+                assert_eq!(u.input_tokens, 3200);
+                assert_eq!(u.output_tokens, 890);
+                assert_eq!(u.cached_input_tokens, None);
+                assert_eq!(u.reasoning_tokens, Some(512));
+            }
+            other => panic!("Expected Completed, got {other:?}"),
+        }
+    }
 }
 
 // --- Mock for tests ---
