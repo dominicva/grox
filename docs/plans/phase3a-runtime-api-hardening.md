@@ -208,10 +208,10 @@ No architecture deep-dive in README — that belongs in docs/.
 
 ### Acceptance criteria
 
-- [ ] README accurately describes all 6+ tools (including replace_all)
-- [ ] Quickstart gets a user from install to working session
-- [ ] Permission modes table covers all modes (Default, Trust, ReadOnly, Yolo)
-- [ ] Slash commands reference includes `/think`, `/model`, `/undo`, `/compact`, `/sessions`, `/resume`, `/status`
-- [ ] Configuration section covers GROX.md, env vars, and `--no-store`
-- [ ] Known limitations section exists
-- [ ] No references to stale features or incorrect module counts
+- [x] README accurately describes all 6+ tools (including replace_all)
+- [x] Quickstart gets a user from install to working session
+- [x] Permission modes table covers all modes (Default, Trust, ReadOnly, Yolo)
+- [x] Slash commands reference includes `/think`, `/model`, `/undo`, `/compact`, `/sessions`, `/resume`, `/status`
+- [x] Configuration section covers GROX.md, env vars, and `--no-store`
+- [x] Known limitations section exists
+- [x] No references to stale features or incorrect module counts
