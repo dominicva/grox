@@ -470,7 +470,7 @@ async fn execute_shell_exec(arguments: &str, project_root: &Path) -> Result<Stri
     let child = Command::new("sh")
         .arg("-c")
         .arg(command)
-        .current_dir(&cwd)
+        .current_dir(&canonical_cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
@@ -1250,6 +1250,26 @@ mod tests {
         let args = json!({
             "command": "echo hi",
             "cwd": ".."
+        })
+        .to_string();
+        let result = Tool::ShellExec.execute(&args, dir.path()).await;
+        assert!(!result.success);
+        assert!(result.output.contains("outside the project root"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_exec_symlinked_cwd_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+
+        // Create a symlink inside the project root that points outside
+        let link = dir.path().join("escape_link");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+
+        let args = json!({
+            "command": "pwd",
+            "cwd": link.to_str().unwrap()
         })
         .to_string();
         let result = Tool::ShellExec.execute(&args, dir.path()).await;
