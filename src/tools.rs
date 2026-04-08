@@ -414,14 +414,36 @@ async fn execute_shell_exec(arguments: &str, project_root: &Path) -> Result<Stri
     let command = args["command"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required parameter: command"))?;
-    let cwd = args["cwd"]
-        .as_str()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| project_root.to_path_buf());
+    let cwd = match args["cwd"].as_str() {
+        Some(cwd_str) => {
+            // Resolve relative cwd against project_root
+            let raw = Path::new(cwd_str);
+            if raw.is_absolute() {
+                raw.to_path_buf()
+            } else {
+                project_root.join(raw)
+            }
+        }
+        None => project_root.to_path_buf(),
+    };
     let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(60).min(300);
 
     if !cwd.exists() {
         bail!("Working directory does not exist: {}", cwd.display());
+    }
+
+    // Containment check: cwd must resolve inside project root (symlink-safe)
+    let canonical_cwd = cwd
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("Failed to resolve cwd '{}': {e}", cwd.display()))?;
+    let canonical_root = project_root
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("Failed to resolve project root: {e}"))?;
+    if !canonical_cwd.starts_with(&canonical_root) {
+        bail!(
+            "Working directory '{}' is outside the project root",
+            cwd.display()
+        );
     }
 
     let child = Command::new("sh")
@@ -1185,6 +1207,78 @@ mod tests {
         let args = json!({"command": "echo ok", "timeout_secs": 999}).to_string();
         let result = Tool::ShellExec.execute(&args, dir.path()).await.unwrap();
         assert_eq!(result.trim(), "ok");
+    }
+
+    #[tokio::test]
+    async fn shell_exec_relative_cwd_resolves_to_project_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("src");
+        std::fs::create_dir(&sub).unwrap();
+
+        let args = json!({
+            "command": "pwd",
+            "cwd": "src"
+        })
+        .to_string();
+        let result = Tool::ShellExec.execute(&args, dir.path()).await.unwrap();
+        assert!(result.contains("src"));
+    }
+
+    #[tokio::test]
+    async fn shell_exec_absolute_cwd_inside_project_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("inner");
+        std::fs::create_dir(&sub).unwrap();
+
+        let args = json!({
+            "command": "pwd",
+            "cwd": sub.to_str().unwrap()
+        })
+        .to_string();
+        let result = Tool::ShellExec.execute(&args, dir.path()).await.unwrap();
+        assert!(result.contains("inner"));
+    }
+
+    #[tokio::test]
+    async fn shell_exec_cwd_escaping_project_root_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+
+        let args = json!({
+            "command": "echo hi",
+            "cwd": outside.path().to_str().unwrap()
+        })
+        .to_string();
+        let result = Tool::ShellExec.execute(&args, dir.path()).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("outside the project root")
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_exec_relative_cwd_escape_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create a subdirectory so the project root has content
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+
+        // Use .. to escape to the parent of the tempdir
+        let args = json!({
+            "command": "echo hi",
+            "cwd": ".."
+        })
+        .to_string();
+        let result = Tool::ShellExec.execute(&args, dir.path()).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("outside the project root")
+        );
     }
 
     // --- grep tests ---
