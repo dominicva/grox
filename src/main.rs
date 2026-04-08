@@ -1,6 +1,7 @@
 mod agent;
 mod api;
 mod checkpoint;
+mod command_registry;
 mod compaction;
 mod context_assembler;
 mod model_profile;
@@ -20,7 +21,8 @@ use clap::Parser;
 use colored::Colorize;
 use context_assembler::ContextAssembler;
 use permissions::{PermissionMode, SessionPermissions};
-use rustyline::DefaultEditor;
+use command_registry::{Command, CommandRegistry, GroxHelper};
+use rustyline::Editor;
 use serde_json::json;
 use session::{SessionIndex, SessionMeta, Transcript, TranscriptEntry};
 use std::io::{Write, stdout};
@@ -365,7 +367,11 @@ async fn main() -> Result<()> {
 
     let mut assembler = ContextAssembler::new(system_prompt);
 
-    let mut rl = DefaultEditor::new()?;
+    let config = rustyline::Config::builder()
+        .completion_type(rustyline::config::CompletionType::List)
+        .build();
+    let mut rl = Editor::with_config(config)?;
+    rl.set_helper(Some(GroxHelper));
 
     loop {
         let input = match rl.readline(&format!("{} ", ">>".green().bold())) {
@@ -380,374 +386,406 @@ async fn main() -> Result<()> {
         if input.is_empty() {
             continue;
         }
-        if input == "/quit" || input == "/exit" {
-            break;
-        }
+        // --- Slash command dispatch via registry ---
+        if input.starts_with('/') {
+            match CommandRegistry::find(&input) {
+                Some((spec, args)) => match spec.command {
+                    Command::Quit => break,
 
-        if input.starts_with("/model ") {
-            let new_model = input.strip_prefix("/model ").unwrap().trim().to_string();
-            if new_model.is_empty() {
-                println!("{}", "usage: /model <name>".dimmed());
-            } else {
-                let profile = model_profile::ModelProfile::for_model(&new_model);
-                if !profile.supports_tools {
-                    println!(
-                        "{}",
-                        format!("  model {new_model} does not support tool use").red()
-                    );
-                } else {
-                    client.set_model(new_model.clone());
-                    session_meta.model = new_model.clone();
-                    println!("  model switched to {}", new_model.cyan());
-                }
-            }
-            continue;
-        }
-
-        if input == "/think" {
-            let profile = model_profile::ModelProfile::for_model(client.model());
-            if !profile.supports_reasoning_effort_control {
-                println!(
-                    "{}",
-                    format!(
-                        "  model {} does not support reasoning effort control",
-                        client.model()
-                    )
-                    .dimmed()
-                );
-                if profile.supports_reasoning() {
-                    println!(
-                        "{}",
-                        "  (this model has built-in reasoning that is always active)".dimmed()
-                    );
-                }
-            } else {
-                // Cycle: off -> low -> high -> off
-                let next = match client.reasoning_effort() {
-                    None => Some(ReasoningEffort::Low),
-                    Some(ReasoningEffort::Low) => Some(ReasoningEffort::High),
-                    Some(ReasoningEffort::High) => None,
-                };
-                client.set_reasoning_effort(next);
-                match next {
-                    Some(effort) => {
-                        println!("  reasoning effort: {}", effort.to_string().cyan())
-                    }
-                    None => println!("  reasoning effort: {}", "off".dimmed()),
-                }
-            }
-            continue;
-        }
-
-        if input == "/status" {
-            let profile = model_profile::ModelProfile::for_model(client.model());
-            let estimated = assembler.estimate_tokens(&history);
-            println!("  model:   {}", client.model().cyan());
-            // Show reasoning capabilities if present
-            let mut caps = Vec::new();
-            if profile.returns_plaintext_reasoning {
-                caps.push("plaintext-reasoning");
-            }
-            if profile.returns_encrypted_reasoning {
-                caps.push("encrypted-reasoning");
-            }
-            if profile.supports_reasoning_effort_control {
-                caps.push("effort-control");
-            }
-            if !caps.is_empty() {
-                println!("  caps:    {}", caps.join(", ").cyan());
-            }
-            if profile.supports_reasoning_effort_control {
-                let effort_str = match client.reasoning_effort() {
-                    Some(e) => e.to_string(),
-                    None => "off".to_string(),
-                };
-                println!("  think:   {}", effort_str.cyan());
-            }
-            println!("  project: {}", project_root.display().to_string().cyan());
-            println!("  mode:    {}", format!("{permission_mode}").cyan());
-            println!("  session: {}", &session_meta.session_id[..8].dimmed());
-            println!(
-                "  context: ~{} tokens (threshold: {})",
-                estimated.to_string().cyan(),
-                profile.compaction_threshold().to_string().cyan()
-            );
-            println!(
-                "  tools:   {}",
-                tools::Tool::all()
-                    .iter()
-                    .map(|t| format!("{t:?}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-                    .dimmed()
-            );
-            continue;
-        }
-
-        if input == "/undo" || input.starts_with("/undo ") {
-            let args = input.strip_prefix("/undo").unwrap().trim();
-
-            // Parse optional mode flag and turn number
-            let mut mode = rewind::RewindMode::Both;
-            let mut turn_number: Option<usize> = None;
-            let mut parse_error = false;
-
-            for arg in args.split_whitespace() {
-                match arg {
-                    "--code" => mode = rewind::RewindMode::CodeOnly,
-                    "--conversation" => mode = rewind::RewindMode::ConversationOnly,
-                    "--both" => mode = rewind::RewindMode::Both,
-                    _ => {
-                        if let Ok(n) = arg.parse::<usize>() {
-                            turn_number = Some(n);
+                    Command::Model => {
+                        let new_model = args.to_string();
+                        if new_model.is_empty() {
+                            println!("{}", "usage: /model <name>".dimmed());
                         } else {
+                            let profile = model_profile::ModelProfile::for_model(&new_model);
+                            if !profile.supports_tools {
+                                println!(
+                                    "{}",
+                                    format!("  model {new_model} does not support tool use").red()
+                                );
+                            } else {
+                                client.set_model(new_model.clone());
+                                session_meta.model = new_model.clone();
+                                println!("  model switched to {}", new_model.cyan());
+                            }
+                        }
+                    }
+
+                    Command::Think => {
+                        let profile = model_profile::ModelProfile::for_model(client.model());
+                        if !profile.supports_reasoning_effort_control {
                             println!(
                                 "{}",
-                                format!("  unknown argument: {arg}. usage: /undo [N] [--code|--conversation|--both]")
-                                    .dimmed()
+                                format!(
+                                    "  model {} does not support reasoning effort control",
+                                    client.model()
+                                )
+                                .dimmed()
                             );
-                            parse_error = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if parse_error {
-                continue;
-            }
-
-            let result = if let Some(n) = turn_number {
-                rewind::rewind_to_turn(&history, n, &project_root, mode)
-            } else {
-                rewind::undo_last_turn(&history, &project_root, mode)
-            };
-
-            match result {
-                Ok(rr) => {
-                    println!("{}", rewind::format_rewind_result(&rr).yellow());
-                    history = rr.entries;
-                    transcript.atomic_rewrite(&history)?;
-                }
-                Err(e) => {
-                    println!("{}", format!("  undo failed: {e}").red());
-                }
-            }
-            continue;
-        }
-
-        if input == "/sessions" {
-            let project_str = project_root.display().to_string();
-            match SessionIndex::list_for_project(&sessions_dir, &project_str) {
-                Ok(sessions) if sessions.is_empty() => {
-                    println!("{}", "  no sessions found for this project".dimmed());
-                }
-                Ok(sessions) => {
-                    println!("  {}", "recent sessions:".bold());
-                    for (i, s) in sessions.iter().take(10).enumerate() {
-                        let active = if s.session_id == session_meta.session_id {
-                            " (current)"
-                        } else {
-                            ""
-                        };
-                        let summary_part = if s.summary.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" — {}", s.summary)
-                        };
-                        println!(
-                            "  {}. {} — {} — {}{}{}",
-                            i + 1,
-                            &s.session_id[..8].cyan(),
-                            s.last_active.format("%Y-%m-%d %H:%M").to_string().dimmed(),
-                            s.model.dimmed(),
-                            summary_part.dimmed(),
-                            active.green(),
-                        );
-                    }
-                    println!("{}", "  use /resume <id> to resume a session".dimmed());
-                }
-                Err(e) => {
-                    println!("{}", format!("  failed to list sessions: {e}").red());
-                }
-            }
-            continue;
-        }
-
-        if input == "/resume" || input.starts_with("/resume ") {
-            let id_arg = input.strip_prefix("/resume").unwrap().trim();
-            if id_arg.is_empty() {
-                println!("{}", "  usage: /resume <session-id-prefix>".dimmed());
-                println!("{}", "  use /sessions to see available sessions".dimmed());
-                continue;
-            }
-
-            // Find matching session
-            let all = match SessionIndex::list(&sessions_dir) {
-                Ok(s) => s,
-                Err(e) => {
-                    println!("{}", format!("  failed to list sessions: {e}").red());
-                    continue;
-                }
-            };
-            let matches: Vec<_> = all
-                .into_iter()
-                .filter(|s| s.session_id.starts_with(id_arg))
-                .collect();
-
-            match matches.len() {
-                0 => {
-                    println!(
-                        "{}",
-                        format!("  no session found matching '{id_arg}'").dimmed()
-                    );
-                }
-                1 => {
-                    let target = &matches[0];
-                    if target.session_id == session_meta.session_id {
-                        println!("{}", "  already in this session".dimmed());
-                        continue;
-                    }
-                    // Warn about cross-project resume
-                    let current_project = project_root.display().to_string();
-                    if target.project_root != current_project {
-                        println!(
-                            "{}",
-                            format!(
-                                "  warning: session was created in '{}', tools will operate on '{}'",
-                                target.project_root, current_project
-                            ).yellow()
-                        );
-                    }
-                    let t = Transcript::new(SessionMeta::transcript_path(
-                        &sessions_dir,
-                        &target.session_id,
-                    ));
-                    match t.read_all() {
-                        Ok(entries) => {
-                            let user_turns = entries
-                                .iter()
-                                .filter(|e| matches!(e, TranscriptEntry::UserMessage { .. }))
-                                .count();
-                            let assistant_turns = entries
-                                .iter()
-                                .filter(|e| matches!(e, TranscriptEntry::AssistantMessage { .. }))
-                                .count();
-                            session_meta = target.clone();
-                            history = entries;
-                            transcript = Transcript::new(SessionMeta::transcript_path(
-                                &sessions_dir,
-                                &session_meta.session_id,
-                            ));
-                            // Update client to match resumed session
-                            client.set_session_id(session_meta.session_id.clone());
-                            if session_meta.model != client.model() {
-                                client.set_model(session_meta.model.clone());
+                            if profile.supports_reasoning() {
                                 println!(
-                                    "  model switched to {} (from resumed session)",
-                                    session_meta.model.cyan()
+                                    "{}",
+                                    "  (this model has built-in reasoning that is always active)"
+                                        .dimmed()
                                 );
                             }
-                            println!(
-                                "  {} session {} — {} user turns, {} assistant responses",
-                                "resumed".green(),
-                                &session_meta.session_id[..8].cyan(),
-                                user_turns,
-                                assistant_turns,
-                            );
-                        }
-                        Err(e) => {
-                            println!("{}", format!("  failed to read transcript: {e}").red());
+                        } else {
+                            let next = match client.reasoning_effort() {
+                                None => Some(ReasoningEffort::Low),
+                                Some(ReasoningEffort::Low) => Some(ReasoningEffort::High),
+                                Some(ReasoningEffort::High) => None,
+                            };
+                            client.set_reasoning_effort(next);
+                            match next {
+                                Some(effort) => {
+                                    println!("  reasoning effort: {}", effort.to_string().cyan())
+                                }
+                                None => println!("  reasoning effort: {}", "off".dimmed()),
+                            }
                         }
                     }
-                }
-                n => {
-                    println!(
-                        "{}",
-                        format!("  '{id_arg}' matches {n} sessions — be more specific:").dimmed()
-                    );
-                    for m in &matches {
+
+                    Command::Status => {
+                        let profile = model_profile::ModelProfile::for_model(client.model());
+                        let estimated = assembler.estimate_tokens(&history);
+                        println!("  model:   {}", client.model().cyan());
+                        let mut caps = Vec::new();
+                        if profile.returns_plaintext_reasoning {
+                            caps.push("plaintext-reasoning");
+                        }
+                        if profile.returns_encrypted_reasoning {
+                            caps.push("encrypted-reasoning");
+                        }
+                        if profile.supports_reasoning_effort_control {
+                            caps.push("effort-control");
+                        }
+                        if !caps.is_empty() {
+                            println!("  caps:    {}", caps.join(", ").cyan());
+                        }
+                        if profile.supports_reasoning_effort_control {
+                            let effort_str = match client.reasoning_effort() {
+                                Some(e) => e.to_string(),
+                                None => "off".to_string(),
+                            };
+                            println!("  think:   {}", effort_str.cyan());
+                        }
+                        println!("  project: {}", project_root.display().to_string().cyan());
+                        println!("  mode:    {}", format!("{permission_mode}").cyan());
+                        println!("  session: {}", &session_meta.session_id[..8].dimmed());
                         println!(
-                            "    {} ({})",
-                            &m.session_id[..8],
-                            m.last_active.format("%Y-%m-%d %H:%M")
+                            "  context: ~{} tokens (threshold: {})",
+                            estimated.to_string().cyan(),
+                            profile.compaction_threshold().to_string().cyan()
+                        );
+                        println!(
+                            "  tools:   {}",
+                            tools::Tool::all()
+                                .iter()
+                                .map(|t| format!("{t:?}"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                                .dimmed()
                         );
                     }
-                }
-            }
-            continue;
-        }
 
-        if input == "/compact" {
-            let old_estimate = assembler.estimate_tokens(&history);
-            let old_count = history.len();
+                    Command::Undo => {
+                        let mut mode = rewind::RewindMode::Both;
+                        let mut turn_number: Option<usize> = None;
+                        let mut parse_error = false;
 
-            // Try heuristic first
-            let heuristic = compaction::heuristic_compact(&history, &project_root);
-            let after_heuristic = assembler.estimate_tokens(&heuristic.entries);
-            let threshold =
-                model_profile::ModelProfile::for_model(client.model()).compaction_threshold();
+                        for arg in args.split_whitespace() {
+                            match arg {
+                                "--code" => mode = rewind::RewindMode::CodeOnly,
+                                "--conversation" => mode = rewind::RewindMode::ConversationOnly,
+                                "--both" => mode = rewind::RewindMode::Both,
+                                _ => {
+                                    if let Ok(n) = arg.parse::<usize>() {
+                                        turn_number = Some(n);
+                                    } else {
+                                        println!(
+                                            "{}",
+                                            format!("  unknown argument: {arg}. usage: /undo [N] [--code|--conversation|--both]")
+                                                .dimmed()
+                                        );
+                                        parse_error = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
 
-            // If still over threshold after heuristic, escalate to LLM compaction
-            let result = if after_heuristic > threshold {
-                match compaction::llm_compact(&heuristic.entries, client.model(), &client).await {
-                    Ok(llm_result) if llm_result.compacted => llm_result,
-                    Ok(llm_result) => {
-                        // LLM didn't help — carry usage into fallback
-                        compaction::CompactionResult {
-                            llm_usage: llm_result.llm_usage,
-                            ..heuristic
+                        if !parse_error {
+                            let result = if let Some(n) = turn_number {
+                                rewind::rewind_to_turn(&history, n, &project_root, mode)
+                            } else {
+                                rewind::undo_last_turn(&history, &project_root, mode)
+                            };
+
+                            match result {
+                                Ok(rr) => {
+                                    println!("{}", rewind::format_rewind_result(&rr).yellow());
+                                    history = rr.entries;
+                                    transcript.atomic_rewrite(&history)?;
+                                }
+                                Err(e) => {
+                                    println!("{}", format!("  undo failed: {e}").red());
+                                }
+                            }
                         }
                     }
-                    Err(e) => {
-                        eprintln!(
-                            "{}",
-                            format!("  warning: LLM compaction failed: {e}").yellow()
-                        );
-                        heuristic
+
+                    Command::Sessions => {
+                        let project_str = project_root.display().to_string();
+                        match SessionIndex::list_for_project(&sessions_dir, &project_str) {
+                            Ok(sessions) if sessions.is_empty() => {
+                                println!("{}", "  no sessions found for this project".dimmed());
+                            }
+                            Ok(sessions) => {
+                                println!("  {}", "recent sessions:".bold());
+                                for (i, s) in sessions.iter().take(10).enumerate() {
+                                    let active = if s.session_id == session_meta.session_id {
+                                        " (current)"
+                                    } else {
+                                        ""
+                                    };
+                                    let summary_part = if s.summary.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(" — {}", s.summary)
+                                    };
+                                    println!(
+                                        "  {}. {} — {} — {}{}{}",
+                                        i + 1,
+                                        &s.session_id[..8].cyan(),
+                                        s.last_active
+                                            .format("%Y-%m-%d %H:%M")
+                                            .to_string()
+                                            .dimmed(),
+                                        s.model.dimmed(),
+                                        summary_part.dimmed(),
+                                        active.green(),
+                                    );
+                                }
+                                println!(
+                                    "{}",
+                                    "  use /resume <id> to resume a session".dimmed()
+                                );
+                            }
+                            Err(e) => {
+                                println!("{}", format!("  failed to list sessions: {e}").red());
+                            }
+                        }
                     }
-                }
-            } else {
-                heuristic
-            };
 
-            // Always account for LLM usage even if compaction didn't reduce size
-            if let Some(u) = &result.llm_usage {
-                session_meta.cumulative_input_tokens += u.input_tokens;
-                session_meta.cumulative_output_tokens += u.output_tokens;
-                let _ = session_meta.save(&sessions_dir);
-            }
+                    Command::Resume => {
+                        if args.is_empty() {
+                            println!("{}", "  usage: /resume <session-id-prefix>".dimmed());
+                            println!(
+                                "{}",
+                                "  use /sessions to see available sessions".dimmed()
+                            );
+                        } else {
+                            let all = match SessionIndex::list(&sessions_dir) {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    println!(
+                                        "{}",
+                                        format!("  failed to list sessions: {e}").red()
+                                    );
+                                    continue;
+                                }
+                            };
+                            let matches: Vec<_> = all
+                                .into_iter()
+                                .filter(|s| s.session_id.starts_with(args))
+                                .collect();
 
-            if result.compacted {
-                let new_estimate = assembler.estimate_tokens(&result.entries);
-                let new_count = result.entries.len();
-                let llm_cost = result.llm_usage.as_ref().and_then(|u| {
-                    let profile = model_profile::ModelProfile::for_model(client.model());
-                    profile.estimate_cost_from_usage(u)
-                });
-                history = result.entries;
-                transcript.atomic_rewrite(&history)?;
-                let mut msg = format!(
-                    "  compacted: {} entries → {} entries, ~{} → ~{} tokens",
-                    old_count, new_count, old_estimate, new_estimate
-                );
-                if let Some(cost) = llm_cost {
-                    msg.push_str(&format!(" (LLM summarization: ~${cost:.4})"));
-                }
-                println!("{}", msg.yellow());
-            } else {
-                let llm_cost = result.llm_usage.as_ref().and_then(|u| {
-                    let profile = model_profile::ModelProfile::for_model(client.model());
-                    profile.estimate_cost_from_usage(u)
-                });
-                if let Some(cost) = llm_cost {
+                            match matches.len() {
+                                0 => {
+                                    println!(
+                                        "{}",
+                                        format!("  no session found matching '{args}'").dimmed()
+                                    );
+                                }
+                                1 => {
+                                    let target = &matches[0];
+                                    if target.session_id == session_meta.session_id {
+                                        println!("{}", "  already in this session".dimmed());
+                                    } else {
+                                        let current_project =
+                                            project_root.display().to_string();
+                                        if target.project_root != current_project {
+                                            println!(
+                                                "{}",
+                                                format!(
+                                                    "  warning: session was created in '{}', tools will operate on '{}'",
+                                                    target.project_root, current_project
+                                                ).yellow()
+                                            );
+                                        }
+                                        let t = Transcript::new(SessionMeta::transcript_path(
+                                            &sessions_dir,
+                                            &target.session_id,
+                                        ));
+                                        match t.read_all() {
+                                            Ok(entries) => {
+                                                let user_turns = entries
+                                                    .iter()
+                                                    .filter(|e| {
+                                                        matches!(
+                                                            e,
+                                                            TranscriptEntry::UserMessage { .. }
+                                                        )
+                                                    })
+                                                    .count();
+                                                let assistant_turns = entries
+                                                    .iter()
+                                                    .filter(|e| {
+                                                        matches!(
+                                                            e,
+                                                            TranscriptEntry::AssistantMessage {
+                                                                ..
+                                                            }
+                                                        )
+                                                    })
+                                                    .count();
+                                                session_meta = target.clone();
+                                                history = entries;
+                                                transcript =
+                                                    Transcript::new(SessionMeta::transcript_path(
+                                                        &sessions_dir,
+                                                        &session_meta.session_id,
+                                                    ));
+                                                client.set_session_id(
+                                                    session_meta.session_id.clone(),
+                                                );
+                                                if session_meta.model != client.model() {
+                                                    client
+                                                        .set_model(session_meta.model.clone());
+                                                    println!(
+                                                        "  model switched to {} (from resumed session)",
+                                                        session_meta.model.cyan()
+                                                    );
+                                                }
+                                                println!(
+                                                    "  {} session {} — {} user turns, {} assistant responses",
+                                                    "resumed".green(),
+                                                    &session_meta.session_id[..8].cyan(),
+                                                    user_turns,
+                                                    assistant_turns,
+                                                );
+                                            }
+                                            Err(e) => {
+                                                println!(
+                                                    "{}",
+                                                    format!("  failed to read transcript: {e}")
+                                                        .red()
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                n => {
+                                    println!(
+                                        "{}",
+                                        format!(
+                                            "  '{args}' matches {n} sessions — be more specific:"
+                                        )
+                                        .dimmed()
+                                    );
+                                    for m in &matches {
+                                        println!(
+                                            "    {} ({})",
+                                            &m.session_id[..8],
+                                            m.last_active.format("%Y-%m-%d %H:%M")
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Command::Compact => {
+                        let old_estimate = assembler.estimate_tokens(&history);
+                        let old_count = history.len();
+
+                        let heuristic = compaction::heuristic_compact(&history, &project_root);
+                        let after_heuristic = assembler.estimate_tokens(&heuristic.entries);
+                        let threshold = model_profile::ModelProfile::for_model(client.model())
+                            .compaction_threshold();
+
+                        let result = if after_heuristic > threshold {
+                            match compaction::llm_compact(&heuristic.entries, client.model(), &client)
+                                .await
+                            {
+                                Ok(llm_result) if llm_result.compacted => llm_result,
+                                Ok(llm_result) => compaction::CompactionResult {
+                                    llm_usage: llm_result.llm_usage,
+                                    ..heuristic
+                                },
+                                Err(e) => {
+                                    eprintln!(
+                                        "{}",
+                                        format!("  warning: LLM compaction failed: {e}").yellow()
+                                    );
+                                    heuristic
+                                }
+                            }
+                        } else {
+                            heuristic
+                        };
+
+                        if let Some(u) = &result.llm_usage {
+                            session_meta.cumulative_input_tokens += u.input_tokens;
+                            session_meta.cumulative_output_tokens += u.output_tokens;
+                            let _ = session_meta.save(&sessions_dir);
+                        }
+
+                        if result.compacted {
+                            let new_estimate = assembler.estimate_tokens(&result.entries);
+                            let new_count = result.entries.len();
+                            let llm_cost = result.llm_usage.as_ref().and_then(|u| {
+                                let profile =
+                                    model_profile::ModelProfile::for_model(client.model());
+                                profile.estimate_cost_from_usage(u)
+                            });
+                            history = result.entries;
+                            transcript.atomic_rewrite(&history)?;
+                            let mut msg = format!(
+                                "  compacted: {} entries → {} entries, ~{} → ~{} tokens",
+                                old_count, new_count, old_estimate, new_estimate
+                            );
+                            if let Some(cost) = llm_cost {
+                                msg.push_str(&format!(" (LLM summarization: ~${cost:.4})"));
+                            }
+                            println!("{}", msg.yellow());
+                        } else {
+                            let llm_cost = result.llm_usage.as_ref().and_then(|u| {
+                                let profile =
+                                    model_profile::ModelProfile::for_model(client.model());
+                                profile.estimate_cost_from_usage(u)
+                            });
+                            if let Some(cost) = llm_cost {
+                                println!(
+                                    "{}",
+                                    format!(
+                                        "  nothing to compact (LLM summarization attempt: ~${cost:.4})"
+                                    )
+                                    .yellow()
+                                );
+                            } else {
+                                println!("{}", "  nothing to compact".dimmed());
+                            }
+                        }
+                    }
+                },
+                None => {
+                    let cmd = input.split_whitespace().next().unwrap_or(&input);
+                    println!("{}", format!("  unknown command: {cmd}").dimmed());
                     println!(
                         "{}",
-                        format!("  nothing to compact (LLM summarization attempt: ~${cost:.4})")
-                            .yellow()
+                        "  type / and press Tab for available commands".dimmed()
                     );
-                } else {
-                    println!("{}", "  nothing to compact".dimmed());
                 }
             }
             continue;
