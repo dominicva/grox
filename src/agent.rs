@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 
 use crate::api::GrokApi;
 use crate::checkpoint::{self, FileSnapshot};
+use crate::permissions::AuthorizationResult;
 use crate::session::TranscriptEntry;
 use crate::tools::Tool;
 
@@ -56,7 +57,7 @@ impl<'a> Agent<'a> {
         on_token: &mut (dyn FnMut(String) + Send),
         on_tool_call: &mut (dyn FnMut(&str, &str) + Send),
         on_tool_result: &mut (dyn FnMut(&str, &str) + Send),
-        on_authorize: &mut (dyn FnMut(&str, &str) -> bool + Send),
+        on_authorize: &mut (dyn FnMut(&str, &str) -> AuthorizationResult + Send),
         on_context_refresh: &mut (dyn FnMut() -> Value + Send),
         on_entry: &mut (dyn FnMut(&TranscriptEntry) -> Result<()> + Send),
         on_reasoning: &mut (dyn FnMut(Option<&str>, Option<&str>, Option<u64>) + Send),
@@ -164,7 +165,8 @@ impl<'a> Agent<'a> {
                 on_entry(&tc_entry)?;
 
                 // Check permission before executing
-                let authorized = on_authorize(&tc.name, &tc.arguments);
+                let auth = on_authorize(&tc.name, &tc.arguments);
+                let authorized = auth.allowed;
                 let is_checkpointed = self.checkpoint_enabled
                     && authorized
                     && CHECKPOINTED_TOOLS.contains(&tc.name.as_str());
@@ -274,8 +276,11 @@ mod tests {
     fn noop_token(_: String) {}
     fn noop_tool_call(_: &str, _: &str) {}
     fn noop_tool_result(_: &str, _: &str) {}
-    fn allow_all(_: &str, _: &str) -> bool {
-        true
+    fn allow_all(_: &str, _: &str) -> AuthorizationResult {
+        AuthorizationResult {
+            allowed: true,
+            warning: None,
+        }
     }
     fn no_refresh() -> Value {
         json!({"role": "system", "content": "test"})
@@ -528,7 +533,7 @@ mod tests {
         let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
         let input = vec![json!({"role": "user", "content": "write a file"})];
 
-        let mut deny_all = |_: &str, _: &str| -> bool { false };
+        let mut deny_all = |_: &str, _: &str| -> AuthorizationResult { AuthorizationResult { allowed: false, warning: None } };
 
         let result = agent
             .run(
@@ -880,7 +885,7 @@ mod tests {
             json!({"role": "user", "content": "write"}),
         ];
 
-        let mut deny_all = |_: &str, _: &str| -> bool { false };
+        let mut deny_all = |_: &str, _: &str| -> AuthorizationResult { AuthorizationResult { allowed: false, warning: None } };
         let mut refresh_count = 0;
 
         agent
@@ -1207,7 +1212,7 @@ mod tests {
 
         let agent = Agent::new(&mock, repo.path());
         let input = vec![json!({"role": "user", "content": "write"})];
-        let mut deny_all = |_: &str, _: &str| -> bool { false };
+        let mut deny_all = |_: &str, _: &str| -> AuthorizationResult { AuthorizationResult { allowed: false, warning: None } };
         let (mut on_entry, collected) = collecting_entries();
 
         agent

@@ -41,6 +41,14 @@ pub enum PermissionCheck {
     Prompt { message: String, allow_always: bool },
 }
 
+/// Result returned by the authorization callback to the agent.
+/// Phase 5 will populate the `warning` field for destructive commands.
+#[derive(Debug, Clone)]
+pub struct AuthorizationResult {
+    pub allowed: bool,
+    pub warning: Option<String>,
+}
+
 /// Session-scoped permission state (tracks "always" grants per directory).
 pub struct SessionPermissions {
     mode: PermissionMode,
@@ -198,10 +206,9 @@ impl SessionPermissions {
     }
 
     /// Full permission flow for a tool call: check, prompt if needed, record grants.
-    /// Returns true if allowed.
-    pub fn authorize(&mut self, tool_name: &str, arguments: &str) -> bool {
+    pub fn authorize(&mut self, tool_name: &str, arguments: &str) -> AuthorizationResult {
         let check = self.check(tool_name, arguments);
-        match &check {
+        let allowed = match &check {
             PermissionCheck::Allow => true,
             PermissionCheck::Deny => false,
             PermissionCheck::Prompt {
@@ -218,7 +225,10 @@ impl SessionPermissions {
 
                 let mut answer = String::new();
                 if io::stdin().read_line(&mut answer).is_err() {
-                    return false;
+                    return AuthorizationResult {
+                        allowed: false,
+                        warning: None,
+                    };
                 }
                 let answer = answer.trim().to_lowercase();
 
@@ -233,6 +243,10 @@ impl SessionPermissions {
                     _ => false,
                 }
             }
+        };
+        AuthorizationResult {
+            allowed,
+            warning: None,
         }
     }
 

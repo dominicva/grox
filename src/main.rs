@@ -905,7 +905,7 @@ async fn main() -> Result<()> {
                         println!("{}", summary.dimmed());
                     }
                 },
-                &mut |name: &str, args: &str| -> bool { session_perms.authorize(name, args) },
+                &mut |name: &str, args: &str| session_perms.authorize(name, args),
                 &mut || {
                     // Refresh repo context after mutating tools
                     let fresh_ctx = repo_context::RepoContext::gather(&project_root);
