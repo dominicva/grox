@@ -144,8 +144,8 @@ impl<'a> Agent<'a> {
                     None
                 };
 
-                let (output, tool_succeeded) = if !authorized {
-                    ("Permission denied by user".to_string(), false)
+                let output = if !authorized {
+                    "Permission denied by user".to_string()
                 } else {
                     if MUTATING_TOOLS.contains(&tc.name.as_str()) {
                         had_mutation = true;
@@ -155,15 +155,12 @@ impl<'a> Agent<'a> {
                         turn_had_shell_exec = true;
                     }
                     match Tool::from_name(&tc.name) {
-                        Some(tool) => {
-                            let outcome = tool.execute(&tc.arguments, &self.project_root).await;
-                            (outcome.output, outcome.success)
-                        }
-                        None => (format!("Unknown tool: {}", tc.name), false),
+                        Some(tool) => tool.execute(&tc.arguments, &self.project_root).await.output,
+                        None => format!("Unknown tool: {}", tc.name),
                     }
                 };
 
-                // Persist checkpoint IMMEDIATELY after post-snapshot, BEFORE
+                // Persist checkpoint IMMEDIATELY after execution, BEFORE
                 // the tool result. This closes the gap where a file is already
                 // changed on disk but no durable checkpoint exists yet.
                 // Each file-modifying tool gets its own checkpoint entry.
@@ -171,12 +168,15 @@ impl<'a> Agent<'a> {
                 // multiple edits to the same file are handled correctly
                 // without explicit dedup.
                 //
-                // Only emit checkpoint when the tool succeeded — failed tools,
-                // permission denials, and validation errors don't produce
-                // checkpoint entries.
-                if tool_succeeded
-                    && let Some((canonical, pre)) = pre_snapshot
+                // Emit a checkpoint whenever the file was actually modified on
+                // disk (post_hash differs from pre_hash), even if the tool
+                // reported failure. This covers partial writes where the file
+                // was mutated before an error occurred. Permission denials and
+                // validation errors that never touch disk produce matching
+                // hashes and are naturally excluded.
+                if let Some((canonical, pre)) = pre_snapshot
                     && let Ok(post) = checkpoint::snapshot_post(&canonical, &self.project_root)
+                    && post != pre
                 {
                     let cp = TranscriptEntry::checkpoint(
                         vec![FileSnapshot {

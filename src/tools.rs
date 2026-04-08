@@ -47,11 +47,13 @@ fn count_occurrences(haystack: &str, needle: &str) -> usize {
 }
 
 /// Typed result from tool execution, replacing bare strings.
-/// Checkpoint emission and undo behavior are driven by `success`.
+/// `success` indicates whether the tool executed without error.
 #[derive(Debug, Clone)]
 pub struct ToolOutcome {
     /// Whether the tool executed successfully (file was written, command ran, etc.).
     /// False for errors, permission denials, and validation failures.
+    /// Used by tests and future phases; checkpoint emission uses hash comparison.
+    #[allow(dead_code)]
     pub success: bool,
     /// Human-readable output to send back to the model.
     pub output: String,
