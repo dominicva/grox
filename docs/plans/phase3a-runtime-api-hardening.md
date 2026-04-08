@@ -89,18 +89,18 @@ Expand ModelProfile from a price/context struct into a capability-aware profile 
 
 ### Acceptance criteria
 
-- [ ] All grok-3, grok-3-mini, grok-4 reasoning, grok-4 non-reasoning, and grok-4 multi-agent families resolve to correct profiles
-- [ ] Capability flags are accurate for each model family
-- [ ] Pricing fields (including `cached_input_price`) are set for all known models
-- [ ] Date suffix variants (e.g., `grok-4-1-fast-reasoning-0415`) resolve correctly via pattern matching
-- [ ] `supports_tools` is explicitly assigned for every known model family
-- [ ] `/model` rejects models with `supports_tools=false` with a clear error message
-- [ ] Unknown model names return a fallback profile (no reasoning, conservative limits) — not an error
-- [ ] Default model is `grok-4-1-fast-reasoning`
-- [ ] Provider-side model rejection (404/not-found) triggers fallback to `grok-3-fast`
-- [ ] Compaction thresholds are recalculated for 2M context models
-- [ ] `/model <name>` works for new model names
-- [ ] `/status` displays the correct model profile info
+- [x] All grok-3, grok-3-mini, grok-4 reasoning, grok-4 non-reasoning, and grok-4 multi-agent families resolve to correct profiles
+- [x] Capability flags are accurate for each model family
+- [x] Pricing fields (including `cached_input_price`) are set for all known models
+- [x] Date suffix variants (e.g., `grok-4-1-fast-reasoning-0415`) resolve correctly via pattern matching
+- [x] `supports_tools` is explicitly assigned for every known model family
+- [x] `/model` rejects models with `supports_tools=false` with a clear error message
+- [x] Unknown model names return a fallback profile (no reasoning, conservative limits) — not an error
+- [x] Default model is `grok-4-1-fast-reasoning`
+- [x] Provider-side model rejection (404/not-found) triggers fallback to `grok-3-fast`
+- [x] Compaction thresholds are recalculated for 2M context models
+- [x] `/model <name>` works for new model names
+- [x] `/status` displays the correct model profile info
 
 ---
 
