@@ -38,7 +38,7 @@ pub struct TurnResponse {
     pub encrypted_reasoning: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -152,8 +152,147 @@ struct ResponsesRequest {
     store: Option<bool>,
 }
 
-// SSE events are parsed from raw serde_json::Value rather than typed structs,
-// since the Responses API sends many event types and we only care about a few.
+// --- SSE event parsing ---
+
+/// A single parsed SSE event from the xAI Responses API.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParsedEvent {
+    /// Streaming text delta
+    TextDelta(String),
+    /// A completed function call
+    ToolCall(ToolCall),
+    /// Reasoning content (plaintext and/or encrypted)
+    Reasoning {
+        plaintext: Option<String>,
+        encrypted: Option<String>,
+    },
+    /// Response completed with usage statistics
+    Completed(Usage),
+    /// Server-side error
+    Error(String),
+    /// End-of-stream marker ([DONE])
+    Done,
+    /// Unhandled event type — safe to ignore
+    Unknown,
+}
+
+/// Parse a single SSE event from the xAI Responses API.
+///
+/// `event_name` is the SSE `event:` field (may be empty or "message").
+/// `data` is the raw `data:` field content.
+///
+/// Returns a `ParsedEvent` describing what happened, or an error if the
+/// data could not be parsed as JSON.
+pub fn parse_sse_event(event_name: &str, data: &str) -> Result<ParsedEvent> {
+    if data == "[DONE]" {
+        return Ok(ParsedEvent::Done);
+    }
+
+    let parsed: Value =
+        serde_json::from_str(data).with_context(|| format!("Failed to parse SSE: {data}"))?;
+
+    // SSE event type can come from the SSE event field or JSON type field
+    let event_type = if !event_name.is_empty() && event_name != "message" {
+        event_name
+    } else {
+        parsed.get("type").and_then(|t| t.as_str()).unwrap_or("")
+    };
+
+    match event_type {
+        "error" => {
+            let message = parsed
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Unknown API error");
+            Ok(ParsedEvent::Error(message.to_string()))
+        }
+        "response.output_text.delta" => {
+            let delta = parsed
+                .get("delta")
+                .and_then(|d| d.as_str())
+                .unwrap_or("")
+                .to_string();
+            Ok(ParsedEvent::TextDelta(delta))
+        }
+        "response.output_item.done" => {
+            let Some(item) = parsed.get("item") else {
+                return Ok(ParsedEvent::Unknown);
+            };
+            let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+            if item_type == "function_call" {
+                let call_id = item
+                    .get("call_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let name = item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let arguments = item
+                    .get("arguments")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("{}")
+                    .to_string();
+                Ok(ParsedEvent::ToolCall(ToolCall {
+                    call_id,
+                    name,
+                    arguments,
+                }))
+            } else if item_type == "reasoning" {
+                let mut plaintext = None;
+                let mut encrypted = None;
+                if let Some(content_arr) = item.get("content").and_then(|c| c.as_array()) {
+                    for block in content_arr {
+                        let block_type =
+                            block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        if block_type == "reasoning_text" {
+                            if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                                plaintext = Some(t.to_string());
+                            }
+                        } else if block_type == "reasoning_encrypted"
+                        && let Some(d) = block.get("data").and_then(|v| v.as_str())
+                    {
+                        encrypted = Some(d.to_string());
+                    }
+                    }
+                }
+                Ok(ParsedEvent::Reasoning {
+                    plaintext,
+                    encrypted,
+                })
+            } else {
+                Ok(ParsedEvent::Unknown)
+            }
+        }
+        "response.completed" => {
+            if let Some(u) = parsed.get("response").and_then(|r| r.get("usage")) {
+                let input_tokens = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                let output_tokens =
+                    u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                let cached_input_tokens = u
+                    .get("input_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+                    .and_then(|v| v.as_u64());
+                let reasoning_tokens = u
+                    .get("output_tokens_details")
+                    .and_then(|d| d.get("reasoning_tokens"))
+                    .and_then(|v| v.as_u64());
+                Ok(ParsedEvent::Completed(Usage {
+                    input_tokens,
+                    output_tokens,
+                    cached_input_tokens,
+                    reasoning_tokens,
+                }))
+            } else {
+                Ok(ParsedEvent::Unknown)
+            }
+        }
+        _ => Ok(ParsedEvent::Unknown),
+    }
+}
 
 const RETRY_DELAYS: &[u64] = &[1, 3];
 
@@ -273,119 +412,31 @@ impl GrokApi for GrokClient {
             let mut encrypted_reasoning: Option<String> = None;
 
             while let Some(event) = stream.try_next().await? {
-                if event.data == "[DONE]" {
-                    break;
-                }
-
                 if std::env::var("GROX_VERBOSE").is_ok() {
                     eprintln!("[SSE] event={} data={}", event.event, event.data);
                 }
 
-                let parsed: Value = serde_json::from_str(&event.data)
-                    .with_context(|| format!("Failed to parse SSE: {}", event.data))?;
-
-                // SSE event type can come from the SSE event field or JSON type field
-                let event_type = if !event.event.is_empty() && event.event != "message" {
-                    event.event.as_str()
-                } else {
-                    parsed.get("type").and_then(|t| t.as_str()).unwrap_or("")
-                };
-
-                match event_type {
-                    // Server-side error
-                    "error" => {
-                        let message = parsed
-                            .get("message")
-                            .and_then(|m| m.as_str())
-                            .unwrap_or("Unknown API error");
-                        bail!("{message}");
+                match parse_sse_event(&event.event, &event.data)? {
+                    ParsedEvent::Done => break,
+                    ParsedEvent::Error(msg) => bail!("{msg}"),
+                    ParsedEvent::TextDelta(delta) => {
+                        on_token(delta.clone());
+                        text.push_str(&delta);
                     }
-                    // Streaming text delta
-                    "response.output_text.delta" => {
-                        if let Some(delta) = parsed.get("delta").and_then(|d| d.as_str()) {
-                            let delta = delta.to_string();
-                            on_token(delta.clone());
-                            text.push_str(&delta);
+                    ParsedEvent::ToolCall(tc) => tool_calls.push(tc),
+                    ParsedEvent::Reasoning {
+                        plaintext,
+                        encrypted,
+                    } => {
+                        if plaintext.is_some() {
+                            reasoning_content = plaintext;
+                        }
+                        if encrypted.is_some() {
+                            encrypted_reasoning = encrypted;
                         }
                     }
-                    // A complete output item (message, function_call, or reasoning)
-                    "response.output_item.done" => {
-                        if let Some(item) = parsed.get("item") {
-                            let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
-
-                            if item_type == "function_call" {
-                                let call_id = item
-                                    .get("call_id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let name = item
-                                    .get("name")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let arguments = item
-                                    .get("arguments")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("{}")
-                                    .to_string();
-
-                                tool_calls.push(ToolCall {
-                                    call_id,
-                                    name,
-                                    arguments,
-                                });
-                            } else if item_type == "reasoning" {
-                                // Reasoning output: extract plaintext or encrypted content
-                                if let Some(content_arr) =
-                                    item.get("content").and_then(|c| c.as_array())
-                                {
-                                    for block in content_arr {
-                                        let block_type = block
-                                            .get("type")
-                                            .and_then(|t| t.as_str())
-                                            .unwrap_or("");
-                                        if block_type == "reasoning_text" {
-                                            if let Some(t) =
-                                                block.get("text").and_then(|v| v.as_str())
-                                            {
-                                                reasoning_content = Some(t.to_string());
-                                            }
-                                        } else if block_type == "reasoning_encrypted"
-                                            && let Some(data) =
-                                                block.get("data").and_then(|v| v.as_str())
-                                        {
-                                            encrypted_reasoning = Some(data.to_string());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    // Response completed — extract usage
-                    "response.completed" => {
-                        if let Some(u) = parsed.get("response").and_then(|r| r.get("usage")) {
-                            let input_tokens =
-                                u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                            let output_tokens =
-                                u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                            let cached_input_tokens = u
-                                .get("input_tokens_details")
-                                .and_then(|d| d.get("cached_tokens"))
-                                .and_then(|v| v.as_u64());
-                            let reasoning_tokens = u
-                                .get("output_tokens_details")
-                                .and_then(|d| d.get("reasoning_tokens"))
-                                .and_then(|v| v.as_u64());
-                            usage = Some(Usage {
-                                input_tokens,
-                                output_tokens,
-                                cached_input_tokens,
-                                reasoning_tokens,
-                            });
-                        }
-                    }
-                    _ => {}
+                    ParsedEvent::Completed(u) => usage = Some(u),
+                    ParsedEvent::Unknown => {}
                 }
             }
 

@@ -69,7 +69,7 @@ pub enum Tool {
     Grep,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ToolCall {
     pub call_id: String,
     pub name: String,
