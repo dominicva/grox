@@ -58,12 +58,32 @@ pub trait GrokApi: Send + Sync {
     ) -> Result<TurnResponse>;
 }
 
+// --- Reasoning effort ---
+
+/// Reasoning effort level for models that support it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ReasoningEffort {
+    Low,
+    High,
+}
+
+impl std::fmt::Display for ReasoningEffort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Low => write!(f, "low"),
+            Self::High => write!(f, "high"),
+        }
+    }
+}
+
 // --- Real client ---
 
 pub struct GrokClient {
     api_key: String,
     model: String,
     http: reqwest::Client,
+    /// Current reasoning effort setting (None = off/not applicable)
+    reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl GrokClient {
@@ -72,6 +92,7 @@ impl GrokClient {
             api_key,
             model,
             http: reqwest::Client::new(),
+            reasoning_effort: None,
         }
     }
 
@@ -81,6 +102,14 @@ impl GrokClient {
 
     pub fn set_model(&mut self, model: String) {
         self.model = model;
+    }
+
+    pub fn reasoning_effort(&self) -> Option<ReasoningEffort> {
+        self.reasoning_effort
+    }
+
+    pub fn set_reasoning_effort(&mut self, effort: Option<ReasoningEffort>) {
+        self.reasoning_effort = effort;
     }
 }
 
@@ -95,6 +124,12 @@ struct ResponsesRequest {
     // Disable parallel tool calls — we execute sequentially
     #[serde(skip_serializing_if = "Option::is_none")]
     parallel_tool_calls: Option<bool>,
+    /// Reasoning effort control (only for models that support it)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<Value>,
+    /// Request specific output types (e.g. encrypted reasoning)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    include: Option<Vec<String>>,
 }
 
 // SSE events are parsed from raw serde_json::Value rather than typed structs,
@@ -125,12 +160,31 @@ impl GrokApi for GrokClient {
         tools: &[Value],
         on_token: &mut (dyn FnMut(String) + Send),
     ) -> Result<TurnResponse> {
+        let profile = crate::model_profile::ModelProfile::for_model(&self.model);
+
+        // Build reasoning parameter if model supports effort control and effort is set
+        let reasoning = if profile.supports_reasoning_effort_control {
+            self.reasoning_effort
+                .map(|e| serde_json::json!({"effort": e.to_string()}))
+        } else {
+            None
+        };
+
+        // Request encrypted reasoning content for models that produce it
+        let include = if profile.returns_encrypted_reasoning {
+            Some(vec!["reasoning.encrypted_content".to_string()])
+        } else {
+            None
+        };
+
         let body = ResponsesRequest {
             model: self.model.clone(),
             input,
             tools: tools.to_vec(),
             stream: true,
             parallel_tool_calls: if tools.is_empty() { None } else { Some(false) },
+            reasoning,
+            include,
         };
 
         let body_json = serde_json::to_value(&body).context("Failed to serialize request body")?;
