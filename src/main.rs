@@ -22,8 +22,8 @@ use clap::Parser;
 use colored::Colorize;
 use context_assembler::ContextAssembler;
 use permissions::{PermissionMode, SessionPermissions};
-use command_registry::{Command, CommandRegistry, GroxHelper};
-use rustyline::Editor;
+use command_registry::{Command, CommandRegistry, GroxHelper, ThinkToggleHandler};
+use rustyline::{Editor, EventHandler, KeyCode, KeyEvent, Modifiers};
 use serde_json::json;
 use session::{SessionIndex, SessionMeta, Transcript, TranscriptEntry};
 
@@ -370,6 +370,14 @@ async fn main() -> Result<()> {
     rl.set_helper(Some(GroxHelper));
     let mut term_renderer = renderer::TerminalRenderer::new();
 
+    // Bind Ctrl+T to toggle thinking display
+    rl.bind_sequence(
+        KeyEvent(KeyCode::Char('t'), Modifiers::CTRL),
+        EventHandler::Conditional(Box::new(ThinkToggleHandler::new(
+            term_renderer.thinking_expanded_handle(),
+        ))),
+    );
+
     loop {
         let input = match rl.readline(&format!("{} ", ">>".green().bold())) {
             Ok(line) => line,
@@ -409,35 +417,53 @@ async fn main() -> Result<()> {
                     }
 
                     Command::Think => {
-                        let profile = model_profile::ModelProfile::for_model(client.model());
-                        if !profile.supports_reasoning_effort_control {
+                        if args == "display" {
+                            let expanded = term_renderer.toggle_thinking_display();
+                            let label = if expanded { "expanded" } else { "collapsed" };
+                            println!("  thinking display: {}", label.cyan());
+                        } else if !args.is_empty() {
                             println!(
                                 "{}",
-                                format!(
-                                    "  model {} does not support reasoning effort control",
-                                    client.model()
-                                )
-                                .dimmed()
+                                format!("  unknown argument: {args}. usage: /think [display]")
+                                    .dimmed()
                             );
-                            if profile.supports_reasoning() {
+                        } else {
+                            let profile =
+                                model_profile::ModelProfile::for_model(client.model());
+                            if !profile.supports_reasoning_effort_control {
                                 println!(
                                     "{}",
-                                    "  (this model has built-in reasoning that is always active)"
-                                        .dimmed()
+                                    format!(
+                                        "  model {} does not support reasoning effort control",
+                                        client.model()
+                                    )
+                                    .dimmed()
                                 );
-                            }
-                        } else {
-                            let next = match client.reasoning_effort() {
-                                None => Some(ReasoningEffort::Low),
-                                Some(ReasoningEffort::Low) => Some(ReasoningEffort::High),
-                                Some(ReasoningEffort::High) => None,
-                            };
-                            client.set_reasoning_effort(next);
-                            match next {
-                                Some(effort) => {
-                                    println!("  reasoning effort: {}", effort.to_string().cyan())
+                                if profile.supports_reasoning() {
+                                    println!(
+                                        "{}",
+                                        "  (this model has built-in reasoning that is always active)"
+                                            .dimmed()
+                                    );
                                 }
-                                None => println!("  reasoning effort: {}", "off".dimmed()),
+                            } else {
+                                let next = match client.reasoning_effort() {
+                                    None => Some(ReasoningEffort::Low),
+                                    Some(ReasoningEffort::Low) => Some(ReasoningEffort::High),
+                                    Some(ReasoningEffort::High) => None,
+                                };
+                                client.set_reasoning_effort(next);
+                                match next {
+                                    Some(effort) => {
+                                        println!(
+                                            "  reasoning effort: {}",
+                                            effort.to_string().cyan()
+                                        )
+                                    }
+                                    None => {
+                                        println!("  reasoning effort: {}", "off".dimmed())
+                                    }
+                                }
                             }
                         }
                     }

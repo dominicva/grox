@@ -1,9 +1,13 @@
+use std::borrow::Cow;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use rustyline::Cmd;
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::Highlighter;
 use rustyline::hint::{Hint, Hinter};
 use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
-use std::borrow::Cow;
 
 /// Identifies which slash command was matched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,8 +88,8 @@ static COMMANDS: [CommandSpec; 8] = [
     CommandSpec {
         name: "think",
         aliases: &[],
-        description: "cycle reasoning effort (off → low → high)",
-        arg_spec: ArgSpec::None,
+        description: "cycle reasoning effort, or toggle display",
+        arg_spec: ArgSpec::Optional("display"),
         command: Command::Think,
     },
     CommandSpec {
@@ -282,6 +286,38 @@ impl Hint for CommandHint {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Ctrl+T keybinding: toggle thinking display
+// ---------------------------------------------------------------------------
+
+/// Rustyline event handler for Ctrl+T that toggles thinking display mode.
+pub struct ThinkToggleHandler {
+    thinking_expanded: Arc<AtomicBool>,
+}
+
+impl ThinkToggleHandler {
+    pub fn new(thinking_expanded: Arc<AtomicBool>) -> Self {
+        Self { thinking_expanded }
+    }
+}
+
+impl rustyline::ConditionalEventHandler for ThinkToggleHandler {
+    fn handle(
+        &self,
+        _evt: &rustyline::Event,
+        _n: rustyline::RepeatCount,
+        _positive: bool,
+        _ctx: &rustyline::EventContext,
+    ) -> Option<Cmd> {
+        let prev = self.thinking_expanded.load(Ordering::Relaxed);
+        self.thinking_expanded.store(!prev, Ordering::Relaxed);
+        let label = if !prev { "expanded" } else { "collapsed" };
+        // Print on a fresh line, then repaint the prompt
+        eprintln!("\r  thinking display: {label}");
+        Some(Cmd::Repaint)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,7 +374,6 @@ mod tests {
         assert!(CommandRegistry::find("/quit foo").is_none());
         assert!(CommandRegistry::find("/exit bar").is_none());
         assert!(CommandRegistry::find("/status hello").is_none());
-        assert!(CommandRegistry::find("/think xyz").is_none());
         assert!(CommandRegistry::find("/sessions junk").is_none());
         assert!(CommandRegistry::find("/compact stuff").is_none());
     }
@@ -347,6 +382,8 @@ mod tests {
     fn find_allows_args_for_optional_arg_commands() {
         assert!(CommandRegistry::find("/model grok-3").is_some());
         assert!(CommandRegistry::find("/model").is_some()); // optional = still matches bare
+        assert!(CommandRegistry::find("/think display").is_some());
+        assert!(CommandRegistry::find("/think").is_some());
         assert!(CommandRegistry::find("/undo 3 --code").is_some());
         assert!(CommandRegistry::find("/undo").is_some());
         assert!(CommandRegistry::find("/resume abc123").is_some());
