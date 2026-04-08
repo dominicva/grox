@@ -160,14 +160,14 @@ Add cache optimization headers, surface cached token savings, and add privacy co
 
 ### Acceptance criteria
 
-- [ ] `x-grok-conv-id` header is set to the session UUID on every API request
-- [ ] `prompt_cache_key` is sent in Responses API requests
-- [ ] Cached token counts are parsed from the API response
-- [ ] Cost display shows cached tokens: `tokens: 1.2k in (800 cached) / 340 out (~$0.0012)`
-- [ ] Cost calculation uses `cached_input_price` for cached tokens
-- [ ] `--no-store` flag causes `store: false` in API requests
-- [ ] `GROX_NO_STORE=1` environment variable works equivalently
-- [ ] Startup warning mentions `--no-store` option
+- [x] `x-grok-conv-id` header is set to the session UUID on every API request
+- [x] `prompt_cache_key` is sent in Responses API requests
+- [x] Cached token counts are parsed from the API response
+- [x] Cost display shows cached tokens: `tokens: 1.2k in (800 cached) / 340 out (~$0.0012)`
+- [x] Cost calculation uses `cached_input_price` for cached tokens
+- [x] `--no-store` flag causes `store: false` in API requests
+- [x] `GROX_NO_STORE=1` environment variable works equivalently
+- [x] Startup warning mentions `--no-store` option
 
 ---
 
