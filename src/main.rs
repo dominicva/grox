@@ -75,9 +75,11 @@ async fn main() -> Result<()> {
         }
     };
 
+    const DEFAULT_MODEL: &str = "grok-4-1-fast-reasoning";
+
     let user_specified_model = cli.model.is_some() || std::env::var("GROX_MODEL").is_ok();
     let model = cli.model.unwrap_or_else(|| {
-        std::env::var("GROX_MODEL").unwrap_or_else(|_| "grok-3-fast".to_string())
+        std::env::var("GROX_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string())
     });
 
     if cli.verbose {
@@ -338,9 +340,17 @@ async fn main() -> Result<()> {
             if new_model.is_empty() {
                 println!("{}", "usage: /model <name>".dimmed());
             } else {
-                client.set_model(new_model.clone());
-                session_meta.model = new_model.clone();
-                println!("  model switched to {}", new_model.cyan());
+                let profile = model_profile::ModelProfile::for_model(&new_model);
+                if !profile.supports_tools {
+                    println!(
+                        "{}",
+                        format!("  model {new_model} does not support tool use").red()
+                    );
+                } else {
+                    client.set_model(new_model.clone());
+                    session_meta.model = new_model.clone();
+                    println!("  model switched to {}", new_model.cyan());
+                }
             }
             continue;
         }
@@ -349,6 +359,20 @@ async fn main() -> Result<()> {
             let profile = model_profile::ModelProfile::for_model(client.model());
             let estimated = assembler.estimate_tokens(&history);
             println!("  model:   {}", client.model().cyan());
+            // Show reasoning capabilities if present
+            let mut caps = Vec::new();
+            if profile.returns_plaintext_reasoning {
+                caps.push("plaintext-reasoning");
+            }
+            if profile.returns_encrypted_reasoning {
+                caps.push("encrypted-reasoning");
+            }
+            if profile.supports_reasoning_effort_control {
+                caps.push("effort-control");
+            }
+            if !caps.is_empty() {
+                println!("  caps:    {}", caps.join(", ").cyan());
+            }
             println!("  project: {}", project_root.display().to_string().cyan());
             println!("  mode:    {}", format!("{permission_mode}").cyan());
             println!("  session: {}", &session_meta.session_id[..8].dimmed());
