@@ -110,23 +110,31 @@ impl CommandRegistry {
             Some((name, rest)) => (name, rest.trim()),
             None => (without_slash, ""),
         };
-        COMMANDS
+        let spec = COMMANDS
             .iter()
-            .find(|spec| spec.name == cmd_name || spec.aliases.contains(&cmd_name))
-            .map(|spec| (spec, args))
+            .find(|spec| spec.name == cmd_name || spec.aliases.contains(&cmd_name))?;
+        // Reject trailing args for commands that accept none — preserves the
+        // original exact-match semantics for /quit, /think, /status, etc.
+        if matches!(spec.arg_spec, ArgSpec::None) && !args.is_empty() {
+            return None;
+        }
+        Some((spec, args))
     }
 
-    /// Return commands whose name starts with `prefix`.
-    /// Exact matches sort first, then alphabetically.
+    /// Return commands whose name or any alias starts with `prefix`.
+    /// Exact matches sort first, then alphabetically by name.
     pub fn prefix_matches(prefix: &str) -> Vec<&'static CommandSpec> {
         let prefix = prefix.strip_prefix('/').unwrap_or(prefix);
         let mut matches: Vec<&CommandSpec> = COMMANDS
             .iter()
-            .filter(|spec| spec.name.starts_with(prefix))
+            .filter(|spec| {
+                spec.name.starts_with(prefix)
+                    || spec.aliases.iter().any(|a| a.starts_with(prefix))
+            })
             .collect();
         matches.sort_by(|a, b| {
-            let a_exact = a.name == prefix;
-            let b_exact = b.name == prefix;
+            let a_exact = a.name == prefix || a.aliases.contains(&prefix);
+            let b_exact = b.name == prefix || b.aliases.contains(&prefix);
             match (a_exact, b_exact) {
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
@@ -160,12 +168,16 @@ impl Completer for GroxHelper {
         pos: usize,
         _ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        // Only complete slash commands, not arguments after the command name.
-        if !line.starts_with('/') || line[1..pos].contains(char::is_whitespace) {
+        // Only complete when cursor is at end of line on a slash command,
+        // and there's no whitespace (still typing command name, not args).
+        if pos != line.len() || pos < 1 || !line.starts_with('/') {
+            return Ok((pos, vec![]));
+        }
+        if line[1..].contains(char::is_whitespace) {
             return Ok((pos, vec![]));
         }
 
-        let prefix = &line[1..pos];
+        let prefix = &line[1..];
         let matches: Vec<&CommandSpec> = if prefix.is_empty() {
             CommandRegistry::all().iter().collect()
         } else {
@@ -174,15 +186,32 @@ impl Completer for GroxHelper {
 
         let pairs = matches
             .into_iter()
-            .map(|cmd| {
+            .flat_map(|cmd| {
                 let arg_hint = match cmd.arg_spec {
                     ArgSpec::Optional(label) => format!(" [{label}]"),
                     ArgSpec::None => String::new(),
                 };
-                Pair {
-                    display: format!("/{}{} — {}", cmd.name, arg_hint, cmd.description),
-                    replacement: format!("/{}", cmd.name),
+                // Yield the canonical name entry.
+                let mut entries = vec![];
+                if cmd.name.starts_with(prefix) || prefix.is_empty() {
+                    entries.push(Pair {
+                        display: format!("/{}{} — {}", cmd.name, arg_hint, cmd.description),
+                        replacement: format!("/{}", cmd.name),
+                    });
                 }
+                // Also yield matching aliases so /ex Tab completes to /exit.
+                for alias in cmd.aliases {
+                    if alias.starts_with(prefix) {
+                        entries.push(Pair {
+                            display: format!(
+                                "/{} (alias for /{}){} — {}",
+                                alias, cmd.name, arg_hint, cmd.description
+                            ),
+                            replacement: format!("/{alias}"),
+                        });
+                    }
+                }
+                entries
             })
             .collect();
 
@@ -207,12 +236,19 @@ impl Hinter for GroxHelper {
         let matches = CommandRegistry::prefix_matches(prefix);
         let first = matches.first()?;
 
+        // Find which name matched — canonical name or an alias.
+        let matched_name = if first.name.starts_with(prefix) {
+            first.name
+        } else {
+            first.aliases.iter().find(|a| a.starts_with(prefix)).copied()?
+        };
+
         // Don't hint for exact match.
-        if first.name == prefix {
+        if matched_name == prefix {
             return None;
         }
 
-        let suffix = &first.name[prefix.len()..];
+        let suffix = &matched_name[prefix.len()..];
         Some(CommandHint {
             completion: suffix.to_string(),
             display: format!("{suffix} — {}", first.description),
@@ -296,6 +332,27 @@ mod tests {
         assert!(CommandRegistry::find("/").is_none());
     }
 
+    #[test]
+    fn find_rejects_trailing_args_for_no_arg_commands() {
+        // ArgSpec::None commands must not match with trailing args
+        assert!(CommandRegistry::find("/quit foo").is_none());
+        assert!(CommandRegistry::find("/exit bar").is_none());
+        assert!(CommandRegistry::find("/status hello").is_none());
+        assert!(CommandRegistry::find("/think xyz").is_none());
+        assert!(CommandRegistry::find("/sessions junk").is_none());
+        assert!(CommandRegistry::find("/compact stuff").is_none());
+    }
+
+    #[test]
+    fn find_allows_args_for_optional_arg_commands() {
+        assert!(CommandRegistry::find("/model grok-3").is_some());
+        assert!(CommandRegistry::find("/model").is_some()); // optional = still matches bare
+        assert!(CommandRegistry::find("/undo 3 --code").is_some());
+        assert!(CommandRegistry::find("/undo").is_some());
+        assert!(CommandRegistry::find("/resume abc123").is_some());
+        assert!(CommandRegistry::find("/resume").is_some());
+    }
+
     // --- Prefix matching tests ---
 
     #[test]
@@ -336,6 +393,20 @@ mod tests {
     fn prefix_matches_no_match() {
         let matches = CommandRegistry::prefix_matches("xyz");
         assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn prefix_matches_includes_aliases() {
+        // /ex should match quit via its "exit" alias
+        let matches = CommandRegistry::prefix_matches("ex");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].name, "quit");
+    }
+
+    #[test]
+    fn prefix_matches_alias_exact_match_priority() {
+        let matches = CommandRegistry::prefix_matches("exit");
+        assert_eq!(matches[0].name, "quit");
     }
 
     // --- All commands tests ---
