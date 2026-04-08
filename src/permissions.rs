@@ -44,6 +44,7 @@ pub enum PermissionCheck {
 /// Result returned by the authorization callback to the agent.
 /// Phase 5 will populate the `warning` field for destructive commands.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AuthorizationResult {
     pub allowed: bool,
     pub warning: Option<String>,

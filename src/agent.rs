@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use crate::api::GrokApi;
 use crate::checkpoint::{self, FileSnapshot};
 use crate::permissions::AuthorizationResult;
+use crate::renderer::Renderer;
 use crate::session::TranscriptEntry;
 use crate::tools::Tool;
 
@@ -50,17 +51,13 @@ impl<'a> Agent<'a> {
     ///
     /// `on_context_refresh` is called after mutating tools execute. It should return
     /// a fresh system prompt (with updated repo context) to replace the existing one.
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub async fn run(
         &self,
         input: Vec<Value>,
-        on_token: &mut (dyn FnMut(String) + Send),
-        on_tool_call: &mut (dyn FnMut(&str, &str) + Send),
-        on_tool_result: &mut (dyn FnMut(&str, &str) + Send),
+        renderer: &mut dyn Renderer,
         on_authorize: &mut (dyn FnMut(&str, &str) -> AuthorizationResult + Send),
         on_context_refresh: &mut (dyn FnMut() -> Value + Send),
         on_entry: &mut (dyn FnMut(&TranscriptEntry) -> Result<()> + Send),
-        on_reasoning: &mut (dyn FnMut(Option<&str>, Option<&str>, Option<u64>) + Send),
     ) -> Result<AgentResult> {
         let mut messages = input;
         let mut final_text = String::new();
@@ -72,7 +69,11 @@ impl<'a> Agent<'a> {
         for _turn in 0..MAX_TURNS {
             let response = self
                 .api
-                .send_turn(messages.clone(), &self.tool_defs, on_token)
+                .send_turn(
+                    messages.clone(),
+                    &self.tool_defs,
+                    &mut |token: String| renderer.on_token(token),
+                )
                 .await?;
 
             // Accumulate usage across all inner iterations
@@ -102,7 +103,7 @@ impl<'a> Agent<'a> {
             // Notify caller of reasoning from every response (intermediate and final)
             if response.reasoning_content.is_some() || response.encrypted_reasoning.is_some() {
                 let reasoning_tokens = response.usage.as_ref().and_then(|u| u.reasoning_tokens);
-                on_reasoning(
+                renderer.on_reasoning(
                     response.reasoning_content.as_deref(),
                     response.encrypted_reasoning.as_deref(),
                     reasoning_tokens,
@@ -152,7 +153,7 @@ impl<'a> Agent<'a> {
             let mut had_mutation = false;
 
             for tc in &response.tool_calls {
-                on_tool_call(&tc.name, &tc.arguments);
+                renderer.on_tool_call(&tc.name, &tc.arguments);
 
                 // Record tool call in transcript and messages
                 let tc_entry = TranscriptEntry::tool_call(&tc.call_id, &tc.name, &tc.arguments);
@@ -233,7 +234,7 @@ impl<'a> Agent<'a> {
                     on_entry(&cp)?;
                 }
 
-                on_tool_result(&tc.name, &output);
+                renderer.on_tool_result(&tc.name, &output);
 
                 // Record tool result in transcript and messages
                 let tr_entry = TranscriptEntry::tool_result(&tc.call_id, &tc.name, &output);
@@ -273,9 +274,14 @@ mod tests {
     use crate::api::mock::{CapturingMockGrokApi, MockGrokApi};
     use crate::tools::ToolCall;
 
-    fn noop_token(_: String) {}
-    fn noop_tool_call(_: &str, _: &str) {}
-    fn noop_tool_result(_: &str, _: &str) {}
+    struct NoopRenderer;
+    impl Renderer for NoopRenderer {
+        fn on_token(&mut self, _: String) {}
+        fn on_tool_call(&mut self, _: &str, _: &str) {}
+        fn on_tool_result(&mut self, _: &str, _: &str) {}
+        fn on_reasoning(&mut self, _: Option<&str>, _: Option<&str>, _: Option<u64>) {}
+    }
+
     fn allow_all(_: &str, _: &str) -> AuthorizationResult {
         AuthorizationResult {
             allowed: true,
@@ -285,7 +291,6 @@ mod tests {
     fn no_refresh() -> Value {
         json!({"role": "system", "content": "test"})
     }
-    fn noop_reasoning(_: Option<&str>, _: Option<&str>, _: Option<u64>) {}
     fn noop_entry(_: &TranscriptEntry) -> Result<()> {
         Ok(())
     }
@@ -340,13 +345,10 @@ mod tests {
         let result = agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut noop_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -383,13 +385,10 @@ mod tests {
         let result = agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut noop_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -413,13 +412,10 @@ mod tests {
         let result = agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut noop_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -450,13 +446,10 @@ mod tests {
         let result = agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut noop_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -493,13 +486,10 @@ mod tests {
         let result = agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut noop_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -538,13 +528,10 @@ mod tests {
         let result = agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut deny_all,
                 &mut no_refresh,
                 &mut noop_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -571,13 +558,10 @@ mod tests {
         agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -627,13 +611,10 @@ mod tests {
         agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -670,13 +651,10 @@ mod tests {
         agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -726,13 +704,10 @@ mod tests {
         let result = agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut noop_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -783,16 +758,13 @@ mod tests {
         let result = agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut || {
                     refresh_count += 1;
                     json!({"role": "system", "content": "refreshed"})
                 },
                 &mut noop_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -838,16 +810,13 @@ mod tests {
         let result = agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut || {
                     refresh_count += 1;
                     json!({"role": "system", "content": "refreshed"})
                 },
                 &mut noop_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -891,16 +860,13 @@ mod tests {
         agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut deny_all,
                 &mut || {
                     refresh_count += 1;
                     json!({"role": "system", "content": "refreshed"})
                 },
                 &mut noop_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -969,13 +935,10 @@ mod tests {
         agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1044,13 +1007,10 @@ mod tests {
         agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1106,13 +1066,10 @@ mod tests {
         agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1163,13 +1120,10 @@ mod tests {
         agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1218,13 +1172,10 @@ mod tests {
         agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut deny_all,
                 &mut no_refresh,
                 &mut on_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1277,13 +1228,10 @@ mod tests {
         agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1348,13 +1296,10 @@ mod tests {
         agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1441,13 +1386,10 @@ mod tests {
         agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1512,13 +1454,10 @@ mod tests {
         agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1597,13 +1536,10 @@ mod tests {
         agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1680,13 +1616,10 @@ mod tests {
         agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1774,13 +1707,10 @@ mod tests {
         agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1848,13 +1778,10 @@ mod tests {
         let result = agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut on_entry,
-                &mut noop_reasoning,
             )
             .await;
         drop(on_entry);
@@ -1960,13 +1887,10 @@ mod tests {
         let result = agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut noop_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -1986,23 +1910,41 @@ mod tests {
 
     // --- Reasoning regression tests ---
 
-    /// Helper that captures on_reasoning callback invocations.
-    #[allow(clippy::type_complexity)]
-    fn capturing_reasoning() -> (
-        impl FnMut(Option<&str>, Option<&str>, Option<u64>) + Send,
-        std::sync::Arc<std::sync::Mutex<Vec<(Option<String>, Option<String>, Option<u64>)>>>,
-    ) {
-        let records = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let records_clone = records.clone();
-        let callback =
-            move |plaintext: Option<&str>, encrypted: Option<&str>, tokens: Option<u64>| {
-                records_clone.lock().unwrap().push((
-                    plaintext.map(|s| s.to_string()),
-                    encrypted.map(|s| s.to_string()),
-                    tokens,
-                ));
-            };
-        (callback, records)
+    type ReasoningRecord = (Option<String>, Option<String>, Option<u64>);
+
+    /// Renderer that captures on_reasoning invocations for testing.
+    struct CapturingReasoningRenderer {
+        records: std::sync::Arc<std::sync::Mutex<Vec<ReasoningRecord>>>,
+    }
+
+    impl CapturingReasoningRenderer {
+        fn new() -> (Self, std::sync::Arc<std::sync::Mutex<Vec<ReasoningRecord>>>) {
+            let records = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            (
+                Self {
+                    records: records.clone(),
+                },
+                records,
+            )
+        }
+    }
+
+    impl Renderer for CapturingReasoningRenderer {
+        fn on_token(&mut self, _: String) {}
+        fn on_tool_call(&mut self, _: &str, _: &str) {}
+        fn on_tool_result(&mut self, _: &str, _: &str) {}
+        fn on_reasoning(
+            &mut self,
+            plaintext: Option<&str>,
+            encrypted: Option<&str>,
+            tokens: Option<u64>,
+        ) {
+            self.records.lock().unwrap().push((
+                plaintext.map(|s| s.to_string()),
+                encrypted.map(|s| s.to_string()),
+                tokens,
+            ));
+        }
     }
 
     #[tokio::test]
@@ -2043,13 +1985,10 @@ mod tests {
         agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut noop_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -2108,13 +2047,10 @@ mod tests {
         agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut NoopRenderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut noop_entry,
-                &mut noop_reasoning,
             )
             .await
             .unwrap();
@@ -2178,22 +2114,19 @@ mod tests {
 
         let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
         let input = vec![json!({"role": "user", "content": "read it"})];
-        let (mut on_reasoning, records) = capturing_reasoning();
+        let (mut renderer, records) = CapturingReasoningRenderer::new();
 
         agent
             .run(
                 input,
-                &mut noop_token,
-                &mut noop_tool_call,
-                &mut noop_tool_result,
+                &mut renderer,
                 &mut allow_all,
                 &mut no_refresh,
                 &mut noop_entry,
-                &mut on_reasoning,
             )
             .await
             .unwrap();
-        drop(on_reasoning);
+        drop(renderer);
 
         let records = records.lock().unwrap();
         assert_eq!(

@@ -7,6 +7,7 @@ mod context_assembler;
 mod model_profile;
 mod permissions;
 mod prompt;
+mod renderer;
 mod repo_context;
 mod rewind;
 mod session;
@@ -25,11 +26,6 @@ use command_registry::{Command, CommandRegistry, GroxHelper};
 use rustyline::Editor;
 use serde_json::json;
 use session::{SessionIndex, SessionMeta, Transcript, TranscriptEntry};
-use std::io::{Write, stdout};
-use syntect::easy::HighlightLines;
-use syntect::highlighting::ThemeSet;
-use syntect::parsing::SyntaxSet;
-use syntect::util::as_24_bit_terminal_escaped;
 
 #[derive(Parser)]
 #[command(name = "grox", about = "Agentic coding with Grok")]
@@ -839,72 +835,12 @@ async fn main() -> Result<()> {
 
         println!();
 
+        let mut term_renderer = renderer::TerminalRenderer::new();
         let agent = Agent::new(&client, &project_root);
         match agent
             .run(
                 api_input,
-                &mut {
-                    let mut first_token = true;
-                    move |token: String| {
-                        if first_token && !token.trim().is_empty() {
-                            first_token = false;
-                        }
-                        print!("{token}");
-                        let _ = stdout().flush();
-                    }
-                },
-                &mut |name: &str, args: &str| {
-                    // Compact one-line display: extract the key param for summary
-                    let summary = summarize_tool_call(name, args);
-                    println!("  {} {}", format!("▸ {name}").cyan(), summary.dimmed());
-                    let _ = stdout().flush();
-                },
-                &mut |name: &str, output: &str| {
-                    const MAX_DISPLAY_LINES: usize = 20;
-
-                    let is_error = output.starts_with("Error:")
-                        || output.starts_with("File '")
-                        || output.starts_with("Permission denied");
-                    if is_error {
-                        let msg = output.lines().next().unwrap_or(output);
-                        println!("{}", format!("  {} {}", "✗".red(), msg).dimmed());
-                    } else if name == "shell_exec" {
-                        if output.is_empty() || output == "(no output)" {
-                            println!("{}", format!("  {} (no output)", "✓".green()).dimmed());
-                        } else {
-                            let lines: Vec<&str> = output.lines().collect();
-                            let total = lines.len();
-                            let show = total.min(MAX_DISPLAY_LINES);
-                            println!("{}", format!("  {}", "✓".green()).dimmed());
-                            for line in &lines[..show] {
-                                println!("  {}", line.dimmed());
-                            }
-                            if total > MAX_DISPLAY_LINES {
-                                println!(
-                                    "  {}",
-                                    format!("... ({} more lines)", total - MAX_DISPLAY_LINES)
-                                        .dimmed()
-                                );
-                            }
-                        }
-                    } else if name == "file_edit" {
-                        // Show the surrounding context with syntax highlighting
-                        println!("{}", format!("  {}", "✓".green()).dimmed());
-                        println!();
-                        format_edit_context(output);
-                        println!();
-                    } else if output.is_empty() {
-                        println!("{}", format!("  {} (empty)", "✓".green()).dimmed());
-                    } else {
-                        let lines: Vec<&str> = output.lines().collect();
-                        let summary = if lines.len() > 5 {
-                            format!("  {} ({} lines)", "✓".green(), lines.len())
-                        } else {
-                            format!("  {} ({} bytes)", "✓".green(), output.len())
-                        };
-                        println!("{}", summary.dimmed());
-                    }
-                },
+                &mut term_renderer,
                 &mut |name: &str, args: &str| session_perms.authorize(name, args),
                 &mut || {
                     // Refresh repo context after mutating tools
@@ -933,19 +869,6 @@ async fn main() -> Result<()> {
                     transcript.append(entry)?;
                     history.push(entry.clone());
                     Ok(())
-                },
-                &mut |plaintext: Option<&str>,
-                      encrypted: Option<&str>,
-                      reasoning_tokens: Option<u64>| {
-                    // Display reasoning from every response (intermediate and final)
-                    if let Some(rc) = plaintext {
-                        // Plaintext reasoning (grok-3-mini): print as-is per 3A spec
-                        println!("{rc}");
-                    }
-                    if encrypted.is_some() {
-                        let token_count = reasoning_tokens.unwrap_or(0);
-                        println!("{}", format!("[thinking... {token_count} tokens]").dimmed());
-                    }
                 },
             )
             .await
@@ -1024,92 +947,6 @@ fn format_token_count(tokens: u64) -> String {
         tokens.to_string()
     } else {
         format!("{:.1}k", tokens as f64 / 1_000.0)
-    }
-}
-
-/// Format file_edit output with syntax highlighting and spacing.
-///
-/// Input format: "Edited path/to/file.ext\n\n   1 | code\n   2 | code\n..."
-fn format_edit_context(output: &str) {
-    let mut lines = output.lines();
-
-    // First line is "Edited <path>" — extract filename for syntax detection
-    let header = lines.next().unwrap_or("");
-    let filename = header.strip_prefix("Edited ").unwrap_or("");
-    println!("  {}", header.dimmed());
-
-    // Skip the blank line separator
-    let _ = lines.next();
-
-    // Collect the context lines (formatted as "   N | code")
-    let context_lines: Vec<&str> = lines.collect();
-    if context_lines.is_empty() {
-        return;
-    }
-
-    // Try syntax highlighting; fall back to dimmed output
-    let ss = SyntaxSet::load_defaults_newlines();
-    let ts = ThemeSet::load_defaults();
-    let theme = &ts.themes["base16-ocean.dark"];
-
-    let syntax = ss
-        .find_syntax_for_file(filename)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| ss.find_syntax_plain_text());
-
-    let mut highlighter = HighlightLines::new(syntax, theme);
-
-    for line in &context_lines {
-        // Split "   N | code" into gutter and code portions
-        if let Some(pipe_pos) = line.find(" | ") {
-            let gutter = &line[..pipe_pos + 3]; // "   N | "
-            let code = &line[pipe_pos + 3..];
-
-            // Highlight the code portion
-            let code_with_nl = format!("{code}\n");
-            let regions = highlighter
-                .highlight_line(&code_with_nl, &ss)
-                .unwrap_or_default();
-            let highlighted = as_24_bit_terminal_escaped(&regions, false);
-
-            print!("  {}", gutter.dimmed());
-            print!("{highlighted}\x1b[0m");
-        } else {
-            // Lines without pipe (e.g. blank lines in output)
-            println!("  {}", line.dimmed());
-        }
-    }
-}
-
-fn summarize_tool_call(name: &str, args: &str) -> String {
-    let parsed: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
-    match name {
-        "file_read" | "list_files" => parsed["path"].as_str().unwrap_or("?").to_string(),
-        "grep" => {
-            let pattern = parsed["pattern"].as_str().unwrap_or("?");
-            let path = parsed["path"].as_str().unwrap_or(".");
-            format!("{pattern} in {path}")
-        }
-        "file_write" => {
-            let path = parsed["path"].as_str().unwrap_or("?");
-            let len = parsed["content"].as_str().map(|c| c.len()).unwrap_or(0);
-            format!("{path} ({len} bytes)")
-        }
-        "file_edit" => {
-            let path = parsed["path"].as_str().unwrap_or("?");
-            path.to_string()
-        }
-        "shell_exec" => {
-            let cmd = parsed["command"].as_str().unwrap_or("?");
-            let truncated: String = cmd.chars().take(80).collect();
-            if truncated.len() < cmd.len() {
-                format!("{truncated}…")
-            } else {
-                truncated
-            }
-        }
-        _ => args.to_string(),
     }
 }
 
