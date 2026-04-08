@@ -10,8 +10,6 @@ Grox is a CLI coding agent powered by [xAI's Grok models](https://x.ai). It read
 cargo install grox-cli
 ```
 
-Requires [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) on your PATH for the grep tool.
-
 ## Quickstart
 
 1. Get an API key from [console.x.ai](https://console.x.ai)
@@ -45,7 +43,7 @@ That's it. Grox detects the project root (via `.git`, `Cargo.toml`, `package.jso
 | **file_write** | Create or overwrite files. Creates parent directories automatically. |
 | **file_edit** | Replace a string in a file. Requires exactly one match by default; set `replace_all: true` to replace every occurrence. |
 | **list_files** | List directory contents. |
-| **grep** | Search file contents by regex using ripgrep. Supports glob filters and case-insensitive mode. |
+| **grep** | Search file contents by regex. Supports glob filters, case-insensitive mode, and respects `.gitignore`. |
 | **shell_exec** | Run shell commands in the project root. Optional `cwd` and `timeout_secs` (default 60, max 300). |
 
 All file tools are path-validated to stay inside the project root.
@@ -121,7 +119,6 @@ Unknown model names get a fallback profile (no reasoning, conservative limits). 
 
 ## Known limitations
 
-- **ripgrep required** — the grep tool calls `rg` and errors if it's not installed
 - **No parallel tool calls** — tools execute sequentially within each turn
 - **Binary files refused** — file_read and file_edit detect binary content (null bytes in the first 8KB) and refuse to operate
 - **Output clipping** — tool outputs over 30KB are truncated before being sent to the model

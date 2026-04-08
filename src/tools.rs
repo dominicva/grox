@@ -1,3 +1,4 @@
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
@@ -189,7 +190,7 @@ impl Tool {
             Tool::Grep => json!({
                 "type": "function",
                 "name": "grep",
-                "description": "Search file contents using ripgrep. Returns matching lines with file paths and line numbers. Use this to find code patterns, function definitions, imports, and references across the codebase.",
+                "description": "Search file contents by regex. Returns matching lines with file paths and line numbers. Use this to find code patterns, function definitions, imports, and references across the codebase. Respects .gitignore.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -545,70 +546,93 @@ async fn execute_grep(arguments: &str, project_root: &Path) -> Result<String> {
         .unwrap_or_else(|| project_root.to_path_buf());
 
     let max_results = args["max_results"].as_u64().unwrap_or(100) as usize;
+    let case_insensitive = args["case_insensitive"].as_bool().unwrap_or(false);
+    let glob_pattern = args["glob"].as_str().map(|s| s.to_string());
 
-    let mut cmd = Command::new("rg");
-    cmd.arg("--line-number")
-        .arg("--no-heading")
-        .arg("--color=never");
+    // Build the regex
+    let re = regex::RegexBuilder::new(pattern)
+        .case_insensitive(case_insensitive)
+        .build()
+        .map_err(|e| anyhow::anyhow!("Grep error: {e}"))?;
 
-    if args["case_insensitive"].as_bool().unwrap_or(false) {
-        cmd.arg("--ignore-case");
+    // Build the directory walker (respects .gitignore automatically)
+    let mut walker = ignore::WalkBuilder::new(&search_path);
+    walker.hidden(true).git_ignore(true).git_global(true);
+
+    if let Some(ref glob) = glob_pattern {
+        let mut override_builder = ignore::overrides::OverrideBuilder::new(&search_path);
+        override_builder
+            .add(glob)
+            .map_err(|e| anyhow::anyhow!("Grep error: invalid glob: {e}"))?;
+        let overrides = override_builder
+            .build()
+            .map_err(|e| anyhow::anyhow!("Grep error: invalid glob: {e}"))?;
+        walker.overrides(overrides);
     }
 
-    if let Some(glob) = args["glob"].as_str() {
-        cmd.arg("--glob").arg(glob);
+    // Search files on a blocking thread to avoid blocking the async runtime
+    let results = tokio::task::spawn_blocking(move || {
+        let mut matches = Vec::new();
+        for entry in walker.build().flatten() {
+            if matches.len() >= max_results {
+                break;
+            }
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            // Skip binary files (check first 8KB for null bytes)
+            if let Ok(f) = std::fs::File::open(path) {
+                let mut reader = BufReader::new(f);
+                let mut is_binary = false;
+                {
+                    let buf = reader.fill_buf().unwrap_or(&[]);
+                    let check_len = buf.len().min(8192);
+                    if buf[..check_len].contains(&0) {
+                        is_binary = true;
+                    }
+                }
+                if is_binary {
+                    continue;
+                }
+                // Re-open for line-by-line reading after the borrow is released
+                drop(reader);
+            }
+            if let Ok(f) = std::fs::File::open(path) {
+                let reader = BufReader::new(f);
+                for (line_num, line) in reader.lines().enumerate() {
+                    if matches.len() >= max_results {
+                        break;
+                    }
+                    if let Ok(line) = line
+                        && re.is_match(&line)
+                    {
+                        let display_path =
+                            path.strip_prefix(&search_path).unwrap_or(path);
+                        matches.push(format!(
+                            "{}:{}:{}",
+                            display_path.display(),
+                            line_num + 1,
+                            line
+                        ));
+                    }
+                }
+            }
+        }
+        matches
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Grep search failed: {e}"))?;
+
+    if results.is_empty() {
+        return Ok("No matches found.".to_string());
     }
 
-    cmd.arg("--max-count").arg(max_results.to_string());
-
-    cmd.arg(pattern).arg(&search_path);
-
-    cmd.stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-
-    let output = match timeout(Duration::from_secs(30), cmd.output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(e)) => {
-            let msg = e.to_string();
-            if msg.contains("No such file or directory") || msg.contains("not found") {
-                bail!("ripgrep (rg) is not installed. Install it with: cargo install ripgrep");
-            }
-            bail!("Failed to run ripgrep: {e}");
-        }
-        Err(_) => bail!("Grep timed out after 30s"),
-    };
-
-    match output.status.code() {
-        Some(0) => {
-            // Matches found — cap output lines
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let lines: Vec<&str> = stdout.lines().collect();
-            if lines.len() > max_results {
-                let truncated: String = lines[..max_results].join("\n");
-                Ok(format!(
-                    "{truncated}\n\n... (results capped at {max_results})"
-                ))
-            } else {
-                Ok(util::clip_for_model(stdout.trim_end()))
-            }
-        }
-        Some(1) => {
-            // No matches
-            Ok("No matches found.".to_string())
-        }
-        Some(2) => {
-            // Error (invalid regex, etc.)
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("Grep error: {}", stderr.trim())
-        }
-        _ => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("not found") || stderr.contains("No such file") {
-                bail!("ripgrep (rg) is not installed. Install it with: cargo install ripgrep");
-            }
-            bail!("Grep failed: {}", stderr.trim())
-        }
+    let output = results.join("\n");
+    if results.len() >= max_results {
+        Ok(format!("{output}\n\n... (results capped at {max_results})"))
+    } else {
+        Ok(util::clip_for_model(&output))
     }
 }
 
