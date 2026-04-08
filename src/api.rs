@@ -84,16 +84,26 @@ pub struct GrokClient {
     http: reqwest::Client,
     /// Current reasoning effort setting (None = off/not applicable)
     reasoning_effort: Option<ReasoningEffort>,
+    /// Session UUID, used for cache optimization headers
+    session_id: String,
+    /// When true, send `store: false` in API requests (privacy mode)
+    no_store: bool,
 }
 
 impl GrokClient {
-    pub fn new(api_key: String, model: String) -> Self {
+    pub fn new(api_key: String, model: String, session_id: String) -> Self {
         Self {
             api_key,
             model,
             http: reqwest::Client::new(),
             reasoning_effort: None,
+            session_id,
+            no_store: false,
         }
+    }
+
+    pub fn set_no_store(&mut self, no_store: bool) {
+        self.no_store = no_store;
     }
 
     pub fn model(&self) -> &str {
@@ -130,6 +140,12 @@ struct ResponsesRequest {
     /// Request specific output types (e.g. encrypted reasoning)
     #[serde(skip_serializing_if = "Option::is_none")]
     include: Option<Vec<String>>,
+    /// Cache key for prompt caching (session UUID)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
+    /// When false, request that the provider not store the conversation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    store: Option<bool>,
 }
 
 // SSE events are parsed from raw serde_json::Value rather than typed structs,
@@ -185,6 +201,8 @@ impl GrokApi for GrokClient {
             parallel_tool_calls: if tools.is_empty() { None } else { Some(false) },
             reasoning,
             include,
+            prompt_cache_key: Some(self.session_id.clone()),
+            store: if self.no_store { Some(false) } else { None },
         };
 
         let body_json = serde_json::to_value(&body).context("Failed to serialize request body")?;
@@ -194,6 +212,7 @@ impl GrokApi for GrokClient {
                 .http
                 .post("https://api.x.ai/v1/responses")
                 .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("x-grok-conv-id", &self.session_id)
                 .json(&body_json);
 
             // Check HTTP status before streaming by sending the request manually

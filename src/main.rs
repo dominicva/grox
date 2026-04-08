@@ -59,6 +59,10 @@ struct Cli {
     /// Set initial reasoning effort (low or high). Only effective on models that support it.
     #[arg(long, num_args = 0..=1, default_missing_value = "low")]
     think: Option<String>,
+
+    /// Do not store conversations on the provider side
+    #[arg(long)]
+    no_store: bool,
 }
 
 #[tokio::main]
@@ -246,7 +250,7 @@ async fn main() -> Result<()> {
     );
     println!(
         "{}",
-        "note: grox can read any file on your system. File contents are sent to xAI and stored for 30 days."
+        "note: grox can read any file on your system. File contents are sent to xAI and stored for 30 days (use --no-store to opt out)."
             .dimmed()
     );
     if resumed {
@@ -283,7 +287,12 @@ async fn main() -> Result<()> {
 
     let mut session_perms = SessionPermissions::new(permission_mode, project_root.clone());
 
-    let mut client = GrokClient::new(api_key, model);
+    let mut client = GrokClient::new(api_key, model, session_meta.session_id.clone());
+
+    // Enable no-store mode if --no-store flag or GROX_NO_STORE=1 env var is set
+    if cli.no_store || std::env::var("GROX_NO_STORE").as_deref() == Ok("1") {
+        client.set_no_store(true);
+    }
 
     // Set initial reasoning effort from --think flag
     if let Some(ref think_arg) = cli.think {
