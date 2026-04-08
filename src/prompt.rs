@@ -80,7 +80,7 @@ fn tools_section() -> String {
 - **list_files**: Explore directory structure. Use this to understand project layout before diving into specific files.
 - **file_read**: Read specific files. Gather context before answering questions about code.
 - **file_write**: Create or overwrite files. Parent directories are created automatically.
-- **file_edit**: Edit a file by replacing a single occurrence of a string. Include enough context in old_string for a unique match. Prefer this over file_write for surgical edits.
+- **file_edit**: Edit a file by replacing occurrences of a string. By default old_string must match exactly once — include enough context for a unique match. Set replace_all to true to replace every occurrence. Prefer this over file_write for surgical edits.
 - **shell_exec**: Run shell commands in the project root. Use for builds, tests, git operations, and other tasks that need a shell."
         .to_string()
 }

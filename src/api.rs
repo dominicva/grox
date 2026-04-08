@@ -578,46 +578,60 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // --- Contract tests from fixture files ---
+    // --- Contract tests from raw SSE fixture files ---
 
-    /// Load a fixture file and replay each line through parse_sse_event,
-    /// collecting the parsed events.
+    /// Parse a raw SSE fixture file (event:/data: framing) and replay each
+    /// frame through `parse_sse_event`, collecting all parsed events.
+    /// This exercises the real wire format, including the [DONE] sentinel.
     fn replay_fixture(filename: &str) -> Vec<ParsedEvent> {
-        let fixture_path = format!(
-            "{}/src/fixtures/{filename}",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let fixture_path =
+            format!("{}/src/fixtures/{filename}", env!("CARGO_MANIFEST_DIR"));
         let content = std::fs::read_to_string(&fixture_path)
             .unwrap_or_else(|e| panic!("Failed to read fixture {fixture_path}: {e}"));
 
+        // SSE frames are separated by blank lines.
+        // Each frame has optional "event: <type>" and required "data: <payload>".
         let mut events = Vec::new();
-        for line in content.lines() {
-            if line.trim().is_empty() {
+        let mut current_event = String::new();
+        let mut current_data = String::new();
+
+        for line in content.lines().chain(std::iter::once("")) {
+            if line.is_empty() {
+                // End of frame — emit if we have data
+                if !current_data.is_empty() {
+                    let parsed = parse_sse_event(&current_event, &current_data).unwrap();
+                    events.push(parsed);
+                }
+                current_event.clear();
+                current_data.clear();
                 continue;
             }
-            let record: Value = serde_json::from_str(line)
-                .unwrap_or_else(|e| panic!("Bad fixture JSON: {e}\nline: {line}"));
-            let event_name = record["event"].as_str().unwrap_or("");
-            let data = serde_json::to_string(&record["data"]).unwrap();
-            let parsed = parse_sse_event(event_name, &data).unwrap();
-            events.push(parsed);
+
+            if let Some(value) = line.strip_prefix("event: ") {
+                current_event = value.to_string();
+            } else if let Some(value) = line.strip_prefix("data: ") {
+                current_data = value.to_string();
+            }
         }
+
         events
     }
 
     #[test]
     fn contract_happy_path_text_and_tool_call() {
-        let events = replay_fixture("happy_path_text_and_tool_call.jsonl");
-        assert_eq!(events.len(), 4);
+        let events = replay_fixture("happy_path_text_and_tool_call.sse");
 
-        // First two events: text deltas
+        // 4 semantic events + [DONE] sentinel
+        assert_eq!(events.len(), 5);
+
+        // Text deltas
         assert_eq!(events[0], ParsedEvent::TextDelta("I'll read ".to_string()));
         assert_eq!(
             events[1],
             ParsedEvent::TextDelta("the file for you.".to_string())
         );
 
-        // Third event: tool call
+        // Tool call
         match &events[2] {
             ParsedEvent::ToolCall(tc) => {
                 assert_eq!(tc.call_id, "call_abc123");
@@ -628,7 +642,7 @@ mod tests {
             other => panic!("Expected ToolCall, got {other:?}"),
         }
 
-        // Fourth event: completed with usage
+        // Completed with usage
         match &events[3] {
             ParsedEvent::Completed(u) => {
                 assert_eq!(u.input_tokens, 1250);
@@ -638,22 +652,27 @@ mod tests {
             }
             other => panic!("Expected Completed, got {other:?}"),
         }
+
+        // [DONE] sentinel is parsed from the raw wire format
+        assert_eq!(events[4], ParsedEvent::Done);
     }
 
     #[test]
     fn contract_reasoning_response() {
-        let events = replay_fixture("reasoning_response.jsonl");
-        assert_eq!(events.len(), 4);
+        let events = replay_fixture("reasoning_response.sse");
+        assert_eq!(events.len(), 5);
 
-        // First event: plaintext reasoning
+        // Plaintext reasoning
         match &events[0] {
             ParsedEvent::Reasoning {
                 plaintext,
                 encrypted,
             } => {
-                assert!(plaintext.is_some());
                 assert!(
-                    plaintext.as_deref().unwrap().contains("refactor the function")
+                    plaintext
+                        .as_deref()
+                        .unwrap()
+                        .contains("refactor the function")
                 );
                 assert!(encrypted.is_none());
             }
@@ -677,21 +696,22 @@ mod tests {
             }
             other => panic!("Expected Completed, got {other:?}"),
         }
+
+        assert_eq!(events[4], ParsedEvent::Done);
     }
 
     #[test]
     fn contract_encrypted_reasoning_with_tool_call() {
-        let events = replay_fixture("encrypted_reasoning_response.jsonl");
-        assert_eq!(events.len(), 4);
+        let events = replay_fixture("encrypted_reasoning_response.sse");
+        assert_eq!(events.len(), 5);
 
-        // First event: encrypted reasoning
+        // Encrypted reasoning
         match &events[0] {
             ParsedEvent::Reasoning {
                 plaintext,
                 encrypted,
             } => {
                 assert!(plaintext.is_none());
-                assert!(encrypted.is_some());
                 assert!(encrypted.as_deref().unwrap().starts_with("eyJhbGci"));
             }
             other => panic!("Expected Reasoning, got {other:?}"),
@@ -714,7 +734,7 @@ mod tests {
             other => panic!("Expected ToolCall, got {other:?}"),
         }
 
-        // Completed — no cached_tokens in this fixture (empty details object)
+        // Completed — empty details object means no cached tokens
         match &events[3] {
             ParsedEvent::Completed(u) => {
                 assert_eq!(u.input_tokens, 3200);
@@ -724,6 +744,31 @@ mod tests {
             }
             other => panic!("Expected Completed, got {other:?}"),
         }
+
+        assert_eq!(events[4], ParsedEvent::Done);
+    }
+
+    #[test]
+    fn contract_error_response() {
+        let events = replay_fixture("error_response.sse");
+        assert_eq!(events.len(), 3);
+
+        // Partial text before the error
+        assert_eq!(
+            events[0],
+            ParsedEvent::TextDelta("Starting to ".to_string())
+        );
+
+        // Error event
+        assert_eq!(
+            events[1],
+            ParsedEvent::Error(
+                "Service temporarily unavailable. Please retry your request.".to_string()
+            )
+        );
+
+        // [DONE] still arrives after the error
+        assert_eq!(events[2], ParsedEvent::Done);
     }
 }
 

@@ -1,4 +1,0 @@
-{"event": "response.output_item.done", "data": {"type": "response.output_item.done", "item": {"type": "reasoning", "content": [{"type": "reasoning_text", "text": "The user wants to refactor the function. Let me analyze the code structure first."}]}}}
-{"event": "response.output_text.delta", "data": {"type": "response.output_text.delta", "delta": "Here's my "}}
-{"event": "response.output_text.delta", "data": {"type": "response.output_text.delta", "delta": "analysis of the code."}}
-{"event": "response.completed", "data": {"type": "response.completed", "response": {"usage": {"input_tokens": 2100, "output_tokens": 580, "input_tokens_details": {"cached_tokens": 1500}, "output_tokens_details": {"reasoning_tokens": 245}}}}}

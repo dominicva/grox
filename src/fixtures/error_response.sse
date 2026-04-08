@@ -1,0 +1,7 @@
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"Starting to "}
+
+event: error
+data: {"type":"error","message":"Service temporarily unavailable. Please retry your request."}
+
+data: [DONE]
