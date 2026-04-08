@@ -176,7 +176,54 @@ impl TerminalRenderer {
     }
 }
 
-fn summarize_tool_call(name: &str, args: &str) -> String {
+/// A renderer that records all calls for testing.
+#[cfg(test)]
+pub struct RecordingRenderer {
+    pub tokens: Vec<String>,
+    pub tool_calls: Vec<(String, String)>,
+    pub tool_results: Vec<(String, String)>,
+    pub reasoning_calls: Vec<(Option<String>, Option<String>, Option<u64>)>,
+}
+
+#[cfg(test)]
+impl RecordingRenderer {
+    pub fn new() -> Self {
+        Self {
+            tokens: Vec::new(),
+            tool_calls: Vec::new(),
+            tool_results: Vec::new(),
+            reasoning_calls: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Renderer for RecordingRenderer {
+    fn on_token(&mut self, token: String) {
+        self.tokens.push(token);
+    }
+    fn on_tool_call(&mut self, name: &str, args: &str) {
+        self.tool_calls.push((name.to_string(), args.to_string()));
+    }
+    fn on_tool_result(&mut self, name: &str, output: &str) {
+        self.tool_results.push((name.to_string(), output.to_string()));
+    }
+    fn on_reasoning(
+        &mut self,
+        plaintext: Option<&str>,
+        encrypted: Option<&str>,
+        reasoning_tokens: Option<u64>,
+    ) {
+        self.reasoning_calls.push((
+            plaintext.map(|s| s.to_string()),
+            encrypted.map(|s| s.to_string()),
+            reasoning_tokens,
+        ));
+    }
+}
+
+/// Summarize a tool call into a compact display string.
+pub fn summarize_tool_call(name: &str, args: &str) -> String {
     let parsed: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
     match name {
         "file_read" | "list_files" => parsed["path"].as_str().unwrap_or("?").to_string(),
@@ -204,5 +251,132 @@ fn summarize_tool_call(name: &str, args: &str) -> String {
             }
         }
         _ => args.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::permissions::AuthorizationResult;
+
+    // --- Renderer trait compliance ---
+
+    #[test]
+    fn recording_renderer_captures_tokens() {
+        let mut r = RecordingRenderer::new();
+        r.on_token("Hello".into());
+        r.on_token(" world".into());
+        assert_eq!(r.tokens, vec!["Hello", " world"]);
+    }
+
+    #[test]
+    fn recording_renderer_captures_tool_calls() {
+        let mut r = RecordingRenderer::new();
+        r.on_tool_call("file_read", r#"{"path":"src/main.rs"}"#);
+        assert_eq!(r.tool_calls.len(), 1);
+        assert_eq!(r.tool_calls[0].0, "file_read");
+    }
+
+    #[test]
+    fn recording_renderer_captures_tool_results() {
+        let mut r = RecordingRenderer::new();
+        r.on_tool_result("file_read", "fn main() {}");
+        assert_eq!(r.tool_results.len(), 1);
+        assert_eq!(r.tool_results[0].0, "file_read");
+        assert_eq!(r.tool_results[0].1, "fn main() {}");
+    }
+
+    #[test]
+    fn recording_renderer_captures_reasoning() {
+        let mut r = RecordingRenderer::new();
+        r.on_reasoning(Some("thinking"), None, Some(42));
+        r.on_reasoning(None, Some("encrypted_blob"), Some(100));
+
+        assert_eq!(r.reasoning_calls.len(), 2);
+        assert_eq!(r.reasoning_calls[0].0.as_deref(), Some("thinking"));
+        assert_eq!(r.reasoning_calls[0].1, None);
+        assert_eq!(r.reasoning_calls[0].2, Some(42));
+        assert_eq!(r.reasoning_calls[1].0, None);
+        assert_eq!(r.reasoning_calls[1].1.as_deref(), Some("encrypted_blob"));
+    }
+
+    #[test]
+    fn recording_renderer_starts_empty() {
+        let r = RecordingRenderer::new();
+        assert!(r.tokens.is_empty());
+        assert!(r.tool_calls.is_empty());
+        assert!(r.tool_results.is_empty());
+        assert!(r.reasoning_calls.is_empty());
+    }
+
+    // --- AuthorizationResult wiring ---
+
+    #[test]
+    fn authorization_result_with_no_warning() {
+        let result = AuthorizationResult {
+            allowed: true,
+            warning: None,
+        };
+        assert!(result.allowed);
+        assert!(result.warning.is_none());
+    }
+
+    #[test]
+    fn authorization_result_denied_with_no_warning() {
+        let result = AuthorizationResult {
+            allowed: false,
+            warning: None,
+        };
+        assert!(!result.allowed);
+        assert!(result.warning.is_none());
+    }
+
+    #[test]
+    fn authorization_result_with_warning_placeholder() {
+        // Phase 5 will populate warnings — verify the field works
+        let result = AuthorizationResult {
+            allowed: true,
+            warning: Some("destructive command detected".into()),
+        };
+        assert!(result.allowed);
+        assert_eq!(
+            result.warning.as_deref(),
+            Some("destructive command detected")
+        );
+    }
+
+    // --- summarize_tool_call ---
+
+    #[test]
+    fn summarize_file_read() {
+        assert_eq!(
+            summarize_tool_call("file_read", r#"{"path":"src/main.rs"}"#),
+            "src/main.rs"
+        );
+    }
+
+    #[test]
+    fn summarize_grep() {
+        assert_eq!(
+            summarize_tool_call("grep", r#"{"pattern":"TODO","path":"src"}"#),
+            "TODO in src"
+        );
+    }
+
+    #[test]
+    fn summarize_file_write() {
+        assert_eq!(
+            summarize_tool_call("file_write", r#"{"path":"x.rs","content":"hello"}"#),
+            "x.rs (5 bytes)"
+        );
+    }
+
+    #[test]
+    fn summarize_shell_exec_truncation() {
+        let long_cmd = "a".repeat(100);
+        let args = format!(r#"{{"command":"{long_cmd}"}}"#);
+        let result = summarize_tool_call("shell_exec", &args);
+        assert!(result.ends_with('…'));
+        assert!(result.len() <= 84); // 80 chars + "…"
     }
 }
