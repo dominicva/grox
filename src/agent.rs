@@ -1978,4 +1978,234 @@ mod tests {
         // Call 3: system + user + tool_call_1 + tool_result_1 + tool_call_2 + tool_result_2 = 6
         assert_eq!(counts[2], 6);
     }
+
+    // --- Reasoning regression tests ---
+
+    /// Helper that captures on_reasoning callback invocations.
+    #[allow(clippy::type_complexity)]
+    fn capturing_reasoning() -> (
+        impl FnMut(Option<&str>, Option<&str>, Option<u64>) + Send,
+        std::sync::Arc<std::sync::Mutex<Vec<(Option<String>, Option<String>, Option<u64>)>>>,
+    ) {
+        let records = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let records_clone = records.clone();
+        let callback =
+            move |plaintext: Option<&str>, encrypted: Option<&str>, tokens: Option<u64>| {
+                records_clone.lock().unwrap().push((
+                    plaintext.map(|s| s.to_string()),
+                    encrypted.map(|s| s.to_string()),
+                    tokens,
+                ));
+            };
+        (callback, records)
+    }
+
+    #[tokio::test]
+    async fn intermediate_reasoning_round_tripped_in_messages() {
+        // Verifies that when an intermediate tool-using turn includes reasoning
+        // content, the reasoning fields are present in the messages sent to the
+        // API on the next iteration.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut &tmp, b"content").unwrap();
+        let path = tmp.path().to_str().unwrap();
+
+        let mock = CapturingMockGrokApi::new(vec![
+            // Iteration 1: model reasons, then calls a tool
+            TurnResponse {
+                text: "Let me read that.".into(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_1".into(),
+                    name: "file_read".into(),
+                    arguments: format!(r#"{{"path": "{}"}}"#, path),
+                }],
+                usage: None,
+                reasoning_content: Some("I should read the file first.".into()),
+                encrypted_reasoning: None,
+            },
+            // Iteration 2: final response
+            TurnResponse {
+                text: "Done.".into(),
+                tool_calls: vec![],
+                usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
+            },
+        ]);
+
+        let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
+        let input = vec![json!({"role": "user", "content": "read it"})];
+
+        agent
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut noop_entry,
+                &mut noop_reasoning,
+            )
+            .await
+            .unwrap();
+
+        // Check the second API call's input for reasoning in the assistant message
+        let inputs = mock.captured_inputs.lock().unwrap();
+        assert_eq!(inputs.len(), 2, "should have made 2 API calls");
+
+        // Find the assistant message in the second call's input
+        let second_call = &inputs[1];
+        let assistant_msg = second_call
+            .iter()
+            .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"))
+            .expect("second call should include an assistant message from iteration 1");
+
+        assert_eq!(
+            assistant_msg
+                .get("reasoning_content")
+                .and_then(|v| v.as_str()),
+            Some("I should read the file first."),
+            "intermediate reasoning_content must be round-tripped"
+        );
+    }
+
+    #[tokio::test]
+    async fn intermediate_encrypted_reasoning_round_tripped_in_messages() {
+        // Same as above but for encrypted reasoning (grok-4 style).
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut &tmp, b"content").unwrap();
+        let path = tmp.path().to_str().unwrap();
+
+        let mock = CapturingMockGrokApi::new(vec![
+            TurnResponse {
+                text: "Let me check.".into(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_1".into(),
+                    name: "file_read".into(),
+                    arguments: format!(r#"{{"path": "{}"}}"#, path),
+                }],
+                usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: Some("opaque-blob-abc123".into()),
+            },
+            TurnResponse {
+                text: "Done.".into(),
+                tool_calls: vec![],
+                usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
+            },
+        ]);
+
+        let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
+        let input = vec![json!({"role": "user", "content": "read it"})];
+
+        agent
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut noop_entry,
+                &mut noop_reasoning,
+            )
+            .await
+            .unwrap();
+
+        let inputs = mock.captured_inputs.lock().unwrap();
+        let second_call = &inputs[1];
+        let assistant_msg = second_call
+            .iter()
+            .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"))
+            .expect("second call should include an assistant message");
+
+        assert_eq!(
+            assistant_msg
+                .get("encrypted_reasoning")
+                .and_then(|v| v.as_str()),
+            Some("opaque-blob-abc123"),
+            "intermediate encrypted_reasoning must be round-tripped"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_reasoning_called_for_intermediate_tool_using_turns() {
+        // Verifies the on_reasoning callback fires for intermediate turns
+        // (not just the final response).
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut &tmp, b"content").unwrap();
+        let path = tmp.path().to_str().unwrap();
+
+        let mock = MockGrokApi::new(vec![
+            // Intermediate turn with reasoning + tool call
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_1".into(),
+                    name: "file_read".into(),
+                    arguments: format!(r#"{{"path": "{}"}}"#, path),
+                }],
+                usage: Some(crate::api::Usage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    cached_input_tokens: None,
+                    reasoning_tokens: Some(30),
+                }),
+                reasoning_content: Some("Thinking about intermediate step.".into()),
+                encrypted_reasoning: None,
+            },
+            // Final turn with different reasoning
+            TurnResponse {
+                text: "All done.".into(),
+                tool_calls: vec![],
+                usage: Some(crate::api::Usage {
+                    input_tokens: 200,
+                    output_tokens: 75,
+                    cached_input_tokens: None,
+                    reasoning_tokens: Some(40),
+                }),
+                reasoning_content: Some("Final thoughts.".into()),
+                encrypted_reasoning: None,
+            },
+        ]);
+
+        let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
+        let input = vec![json!({"role": "user", "content": "read it"})];
+        let (mut on_reasoning, records) = capturing_reasoning();
+
+        agent
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut noop_entry,
+                &mut on_reasoning,
+            )
+            .await
+            .unwrap();
+        drop(on_reasoning);
+
+        let records = records.lock().unwrap();
+        assert_eq!(
+            records.len(),
+            2,
+            "on_reasoning should fire for both intermediate and final turns"
+        );
+
+        // First call: intermediate turn reasoning
+        assert_eq!(
+            records[0].0.as_deref(),
+            Some("Thinking about intermediate step.")
+        );
+        assert_eq!(records[0].2, Some(30));
+
+        // Second call: final turn reasoning
+        assert_eq!(records[1].0.as_deref(), Some("Final thoughts."));
+        assert_eq!(records[1].2, Some(40));
+    }
 }

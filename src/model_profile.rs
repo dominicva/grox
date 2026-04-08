@@ -173,7 +173,12 @@ impl ModelProfile {
         )
     }
 
-    /// Estimate cost using full Usage details (cached tokens, reasoning tokens).
+    /// Estimate cost using full Usage details (cached token pricing).
+    ///
+    /// Note: `reasoning_tokens` is a breakdown of `output_tokens`, not an
+    /// additional count — the API includes reasoning tokens in `output_tokens`.
+    /// We therefore price `output_tokens` at the output rate without adding
+    /// `reasoning_tokens` separately, which would double-count.
     #[allow(dead_code)] // Will be used by Phase 4 cache display
     pub fn estimate_cost_from_usage(&self, usage: &crate::api::Usage) -> Option<f64> {
         if self.input_price == 0.0 && self.output_price == 0.0 {
@@ -351,6 +356,46 @@ mod tests {
     fn estimate_cost_unknown_model_returns_none() {
         let p = ModelProfile::for_model("unknown");
         assert!(p.estimate_cost(1000, 500).is_none());
+    }
+
+    #[test]
+    fn estimate_cost_from_usage_reasoning_tokens_not_double_counted() {
+        // The API includes reasoning_tokens inside output_tokens (it's a
+        // breakdown, not an additive field). Verify that estimate_cost_from_usage
+        // prices output_tokens once — if reasoning_tokens were added separately
+        // the cost would be higher.
+        let p = ModelProfile::for_model("grok-4-1-fast-reasoning");
+        let usage = crate::api::Usage {
+            input_tokens: 1_000,
+            output_tokens: 500, // includes 200 reasoning tokens
+            cached_input_tokens: None,
+            reasoning_tokens: Some(200),
+        };
+        let cost = p.estimate_cost_from_usage(&usage).unwrap();
+        // 1000 * 2.0 / 1M + 500 * 6.0 / 1M = 0.002 + 0.003 = 0.005
+        assert!(
+            (cost - 0.005).abs() < 1e-9,
+            "reasoning_tokens must not be double-counted; got {cost}"
+        );
+    }
+
+    #[test]
+    fn estimate_cost_from_usage_cached_tokens() {
+        let p = ModelProfile::for_model("grok-3");
+        let usage = crate::api::Usage {
+            input_tokens: 1_000,
+            output_tokens: 500,
+            cached_input_tokens: Some(400),
+            reasoning_tokens: None,
+        };
+        let cost = p.estimate_cost_from_usage(&usage).unwrap();
+        // non_cached=600, cached=400
+        // 600 * 3.0 / 1M + 400 * 0.50 / 1M + 500 * 15.0 / 1M
+        // = 0.0018 + 0.0002 + 0.0075 = 0.0095
+        assert!(
+            (cost - 0.0095).abs() < 1e-9,
+            "cached tokens should use cached_input_price; got {cost}"
+        );
     }
 
     // --- Compaction thresholds ---

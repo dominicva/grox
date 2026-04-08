@@ -448,12 +448,15 @@ pub mod mock {
         }
     }
 
-    /// A mock that captures the input message counts from each send_turn call.
-    /// Used to verify that the agent accumulates full history across iterations.
+    /// A mock that captures the input messages from each send_turn call.
+    /// Used to verify that the agent accumulates full history across iterations
+    /// and that reasoning fields are round-tripped in intermediate messages.
     pub struct CapturingMockGrokApi {
         responses: std::sync::Mutex<Vec<TurnResponse>>,
         /// Number of input messages received on each call.
         pub captured_input_counts: std::sync::Mutex<Vec<usize>>,
+        /// Full input messages received on each call.
+        pub captured_inputs: std::sync::Mutex<Vec<Vec<Value>>>,
     }
 
     impl CapturingMockGrokApi {
@@ -461,6 +464,7 @@ pub mod mock {
             Self {
                 responses: std::sync::Mutex::new(responses),
                 captured_input_counts: std::sync::Mutex::new(Vec::new()),
+                captured_inputs: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -474,6 +478,7 @@ pub mod mock {
             on_token: &mut (dyn FnMut(String) + Send),
         ) -> Result<TurnResponse> {
             self.captured_input_counts.lock().unwrap().push(input.len());
+            self.captured_inputs.lock().unwrap().push(input.clone());
             let mut responses = self.responses.lock().unwrap();
             if responses.is_empty() {
                 bail!("CapturingMockGrokApi: no more scripted responses");
