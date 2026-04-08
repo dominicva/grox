@@ -84,7 +84,11 @@ pub async fn maybe_compact(
     // Check if heuristic was sufficient
     let after_heuristic = assembler.estimate_tokens(&heuristic_result.entries);
     if after_heuristic <= profile.compaction_threshold() {
-        return if heuristic_result.compacted { Some(heuristic_result) } else { None };
+        return if heuristic_result.compacted {
+            Some(heuristic_result)
+        } else {
+            None
+        };
     }
 
     // Layer 2: LLM compaction on the heuristic-compacted entries
@@ -112,7 +116,11 @@ pub async fn maybe_compact(
         }
         Err(e) => {
             eprintln!("  warning: LLM compaction failed: {e}");
-            if heuristic_result.compacted { Some(heuristic_result) } else { None }
+            if heuristic_result.compacted {
+                Some(heuristic_result)
+            } else {
+                None
+            }
         }
     }
 }
@@ -152,18 +160,23 @@ pub fn heuristic_compact(entries: &[TranscriptEntry], project_root: &Path) -> Co
 
     while i < old_entries.len() {
         match &old_entries[i] {
-            TranscriptEntry::ToolCall { call_id, name, arguments, .. }
-                if name == "file_read"
-                    && extract_path(arguments)
-                        .map(|p| normalize_path(&p, project_root))
-                        .and_then(|norm| last_read_index.get(&norm).copied())
-                        .is_some_and(|last_idx| last_idx > i) =>
+            TranscriptEntry::ToolCall {
+                call_id,
+                name,
+                arguments,
+                ..
+            } if name == "file_read"
+                && extract_path(arguments)
+                    .map(|p| normalize_path(&p, project_root))
+                    .and_then(|norm| last_read_index.get(&norm).copied())
+                    .is_some_and(|last_idx| last_idx > i) =>
             {
                 // This file_read has a later duplicate — skip both ToolCall and ToolResult
                 let cid = call_id.clone();
                 i += 1;
                 while i < old_entries.len() {
-                    if matches!(&old_entries[i], TranscriptEntry::ToolResult { call_id, .. } if call_id == &cid) {
+                    if matches!(&old_entries[i], TranscriptEntry::ToolResult { call_id, .. } if call_id == &cid)
+                    {
                         i += 1; // skip the result too
                         break;
                     }
@@ -179,9 +192,15 @@ pub fn heuristic_compact(entries: &[TranscriptEntry], project_root: &Path) -> Co
                 result.push(old_entries[i].clone());
                 i += 1;
             }
-            TranscriptEntry::ToolResult { call_id, name, output, .. } => {
+            TranscriptEntry::ToolResult {
+                call_id,
+                name,
+                output,
+                ..
+            } => {
                 // Replace tool result content with placeholder
-                let placeholder = make_placeholder(name, output, &find_args_for_call_id(old_entries, call_id));
+                let placeholder =
+                    make_placeholder(name, output, &find_args_for_call_id(old_entries, call_id));
                 if placeholder != *output {
                     compacted = true;
                 }
@@ -372,11 +391,16 @@ fn find_recent_boundary(entries: &[TranscriptEntry], recent_turns: usize) -> usi
 
 /// For each file path that was read (via file_read ToolCall), record the index of its last occurrence.
 /// Paths are normalized so that relative and absolute references to the same file match.
-fn find_last_file_read_indices(entries: &[TranscriptEntry], project_root: &Path) -> HashMap<String, usize> {
+fn find_last_file_read_indices(
+    entries: &[TranscriptEntry],
+    project_root: &Path,
+) -> HashMap<String, usize> {
     let mut last_read: HashMap<String, usize> = HashMap::new();
 
     for (i, entry) in entries.iter().enumerate() {
-        if let TranscriptEntry::ToolCall { name, arguments, .. } = entry
+        if let TranscriptEntry::ToolCall {
+            name, arguments, ..
+        } = entry
             && name == "file_read"
             && let Some(path) = extract_path(arguments)
         {
@@ -409,7 +433,9 @@ fn clean_path(path: &Path) -> PathBuf {
     for component in path.components() {
         match component {
             std::path::Component::CurDir => {} // skip `.`
-            std::path::Component::ParentDir => { out.pop(); }
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
             other => out.push(other),
         }
     }
@@ -426,7 +452,9 @@ fn extract_path(arguments: &str) -> Option<String> {
 /// Find the arguments string for a ToolCall with the given call_id.
 fn find_args_for_call_id(entries: &[TranscriptEntry], target_call_id: &str) -> String {
     for entry in entries {
-        if let TranscriptEntry::ToolCall { call_id, arguments, .. } = entry
+        if let TranscriptEntry::ToolCall {
+            call_id, arguments, ..
+        } = entry
             && call_id == target_call_id
         {
             return arguments.clone();
@@ -462,9 +490,7 @@ fn make_placeholder(tool_name: &str, output: &str, arguments: &str) -> String {
             let match_count = output.lines().count();
             format!("[grep: \"{pattern}\" — {match_count} matches]")
         }
-        "shell_exec" => {
-            truncate_shell_output(output)
-        }
+        "shell_exec" => truncate_shell_output(output),
         _ => {
             format!("[{tool_name}: {line_count} lines]")
         }
@@ -482,7 +508,9 @@ fn format_entries_for_summarization(entries: &[TranscriptEntry]) -> String {
             TranscriptEntry::AssistantMessage { content, .. } => {
                 text.push_str(&format!("Assistant: {content}\n\n"));
             }
-            TranscriptEntry::ToolCall { name, arguments, .. } => {
+            TranscriptEntry::ToolCall {
+                name, arguments, ..
+            } => {
                 text.push_str(&format!("Tool call: {name}({arguments})\n\n"));
             }
             TranscriptEntry::ToolResult { name, output, .. } => {
@@ -496,8 +524,7 @@ fn format_entries_for_summarization(entries: &[TranscriptEntry]) -> String {
             TranscriptEntry::CompactionSummary { summary, .. } => {
                 text.push_str(&format!("Previous summary: {summary}\n\n"));
             }
-            TranscriptEntry::SystemEvent { .. }
-            | TranscriptEntry::Checkpoint { .. } => {}
+            TranscriptEntry::SystemEvent { .. } | TranscriptEntry::Checkpoint { .. } => {}
         }
     }
     text
@@ -593,7 +620,14 @@ mod tests {
 
     #[test]
     fn boundary_with_tool_turns() {
-        let mut entries = tool_turn("q0", "file_read", r#"{"path":"a.rs"}"#, "c0", "content", "a0");
+        let mut entries = tool_turn(
+            "q0",
+            "file_read",
+            r#"{"path":"a.rs"}"#,
+            "c0",
+            "content",
+            "a0",
+        );
         entries.extend(simple_turn("q1", "a1"));
         entries.extend(simple_turn("q2", "a2"));
         entries.extend(simple_turn("q3", "a3"));
@@ -641,9 +675,10 @@ mod tests {
         assert!(result.compacted);
 
         // Find the tool result in the compacted entries
-        let tool_result = result.entries.iter().find(|e| {
-            matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c0")
-        });
+        let tool_result = result
+            .entries
+            .iter()
+            .find(|e| matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c0"));
         assert!(tool_result.is_some());
         if let TranscriptEntry::ToolResult { output, .. } = tool_result.unwrap() {
             assert_eq!(output, "[file_read: src/main.rs — 3 lines]");
@@ -676,9 +711,10 @@ mod tests {
         let result = heuristic_compact(&entries, Path::new("/project"));
 
         // The recent file_read result should be unchanged
-        let recent_result = result.entries.iter().find(|e| {
-            matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c5")
-        });
+        let recent_result = result
+            .entries
+            .iter()
+            .find(|e| matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c5"));
         assert!(recent_result.is_some());
         if let TranscriptEntry::ToolResult { output, .. } = recent_result.unwrap() {
             assert_eq!(output, "recent file content that should be preserved");
@@ -725,9 +761,10 @@ mod tests {
         assert!(!c0_exists, "duplicate file read should be removed");
 
         // The second read (c1) should still exist (as a placeholder)
-        let c1_exists = result.entries.iter().any(|e| {
-            matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c1")
-        });
+        let c1_exists = result
+            .entries
+            .iter()
+            .any(|e| matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c1"));
         assert!(c1_exists, "most recent file read should be kept");
     }
 
@@ -759,15 +796,20 @@ mod tests {
         assert!(result.compacted);
 
         // The relative read (c0) should be removed — it resolves to the same file
-        let c0_exists = result.entries.iter().any(|e| {
-            matches!(e, TranscriptEntry::ToolCall { call_id, .. } if call_id == "c0")
-        });
-        assert!(!c0_exists, "relative path read should be deduped against absolute path");
+        let c0_exists = result
+            .entries
+            .iter()
+            .any(|e| matches!(e, TranscriptEntry::ToolCall { call_id, .. } if call_id == "c0"));
+        assert!(
+            !c0_exists,
+            "relative path read should be deduped against absolute path"
+        );
 
         // The absolute read (c1) should be kept (most recent)
-        let c1_exists = result.entries.iter().any(|e| {
-            matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c1")
-        });
+        let c1_exists = result
+            .entries
+            .iter()
+            .any(|e| matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c1"));
         assert!(c1_exists);
     }
 
@@ -796,10 +838,14 @@ mod tests {
         }
 
         let result = heuristic_compact(&entries, Path::new("/project"));
-        let c0_exists = result.entries.iter().any(|e| {
-            matches!(e, TranscriptEntry::ToolCall { call_id, .. } if call_id == "c0")
-        });
-        assert!(!c0_exists, "path with ../ should be deduped against clean path");
+        let c0_exists = result
+            .entries
+            .iter()
+            .any(|e| matches!(e, TranscriptEntry::ToolCall { call_id, .. } if call_id == "c0"));
+        assert!(
+            !c0_exists,
+            "path with ../ should be deduped against clean path"
+        );
     }
 
     #[test]
@@ -831,15 +877,17 @@ mod tests {
         assert!(result.compacted);
 
         // Old read should be removed
-        let c0_exists = result.entries.iter().any(|e| {
-            matches!(e, TranscriptEntry::ToolCall { call_id, .. } if call_id == "c0")
-        });
+        let c0_exists = result
+            .entries
+            .iter()
+            .any(|e| matches!(e, TranscriptEntry::ToolCall { call_id, .. } if call_id == "c0"));
         assert!(!c0_exists);
 
         // Recent read should be untouched
-        let c5_result = result.entries.iter().find(|e| {
-            matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c5")
-        });
+        let c5_result = result
+            .entries
+            .iter()
+            .find(|e| matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c5"));
         if let Some(TranscriptEntry::ToolResult { output, .. }) = c5_result {
             assert_eq!(output, "current content");
         }
@@ -871,9 +919,10 @@ mod tests {
         let result = heuristic_compact(&entries, Path::new("/project"));
         assert!(result.compacted);
 
-        let shell_result = result.entries.iter().find(|e| {
-            matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c0")
-        });
+        let shell_result = result
+            .entries
+            .iter()
+            .find(|e| matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c0"));
         if let Some(TranscriptEntry::ToolResult { output, .. }) = shell_result {
             assert!(output.contains("line 0"));
             assert!(output.contains("line 1"));
@@ -905,9 +954,10 @@ mod tests {
 
         let result = heuristic_compact(&entries, Path::new("/project"));
         // Shell output is short enough — no truncation needed
-        let shell_result = result.entries.iter().find(|e| {
-            matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c0")
-        });
+        let shell_result = result
+            .entries
+            .iter()
+            .find(|e| matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c0"));
         if let Some(TranscriptEntry::ToolResult { output, .. }) = shell_result {
             assert_eq!(output, short_output);
         }
@@ -962,9 +1012,10 @@ mod tests {
         }
 
         let result = heuristic_compact(&entries, Path::new("/project"));
-        let grep_result = result.entries.iter().find(|e| {
-            matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c0")
-        });
+        let grep_result = result
+            .entries
+            .iter()
+            .find(|e| matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c0"));
         if let Some(TranscriptEntry::ToolResult { output, .. }) = grep_result {
             assert_eq!(output, r#"[grep: "TODO" — 2 matches]"#);
         }
@@ -1059,9 +1110,10 @@ mod tests {
         }
 
         let result = heuristic_compact(&entries, Path::new("/project"));
-        let tr = result.entries.iter().find(|e| {
-            matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c0")
-        });
+        let tr = result
+            .entries
+            .iter()
+            .find(|e| matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c0"));
         if let Some(TranscriptEntry::ToolResult { output, .. }) = tr {
             assert_eq!(output, "[file_write: out.txt]");
         }
@@ -1082,9 +1134,10 @@ mod tests {
         }
 
         let result = heuristic_compact(&entries, Path::new("/project"));
-        let tr = result.entries.iter().find(|e| {
-            matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c0")
-        });
+        let tr = result
+            .entries
+            .iter()
+            .find(|e| matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c0"));
         if let Some(TranscriptEntry::ToolResult { output, .. }) = tr {
             assert_eq!(output, "[file_edit: src/lib.rs]");
         }
@@ -1096,7 +1149,10 @@ mod tests {
 
     #[test]
     fn mixed_turn_both_tools_compacted() {
-        let long_output = (0..20).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        let long_output = (0..20)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let mut entries = vec![
             TranscriptEntry::user_message("q0"),
             TranscriptEntry::tool_call("c0a", "file_read", r#"{"path":"a.rs"}"#),
@@ -1113,17 +1169,19 @@ mod tests {
         assert!(result.compacted);
 
         // file_read should be placeholder
-        let fr = result.entries.iter().find(|e| {
-            matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c0a")
-        });
+        let fr = result
+            .entries
+            .iter()
+            .find(|e| matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c0a"));
         if let Some(TranscriptEntry::ToolResult { output, .. }) = fr {
             assert!(output.starts_with("[file_read:"));
         }
 
         // shell_exec should be truncated
-        let se = result.entries.iter().find(|e| {
-            matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c0b")
-        });
+        let se = result
+            .entries
+            .iter()
+            .find(|e| matches!(e, TranscriptEntry::ToolResult { call_id, .. } if call_id == "c0b"));
         if let Some(TranscriptEntry::ToolResult { output, .. }) = se {
             assert!(output.contains("lines omitted"));
         }
@@ -1146,7 +1204,8 @@ mod tests {
             entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
         }
 
-        let result = maybe_compact(&entries, &assembler, "grok-3", Path::new("/project"), &mock).await;
+        let result =
+            maybe_compact(&entries, &assembler, "grok-3", Path::new("/project"), &mock).await;
         assert!(result.is_none(), "should not compact when below threshold");
     }
 
@@ -1173,16 +1232,23 @@ mod tests {
         }
 
         let before_estimate = assembler.estimate_tokens(&entries);
-        assert!(before_estimate > threshold, "setup: should exceed threshold");
+        assert!(
+            before_estimate > threshold,
+            "setup: should exceed threshold"
+        );
 
         // Heuristic alone should handle this (big file_read → placeholder)
         let mock = MockGrokApi::new(vec![]);
-        let result = maybe_compact(&entries, &assembler, "grok-3", Path::new("/project"), &mock).await;
+        let result =
+            maybe_compact(&entries, &assembler, "grok-3", Path::new("/project"), &mock).await;
         assert!(result.is_some(), "should compact when above threshold");
 
         let compacted = result.unwrap();
         let after_estimate = assembler.estimate_tokens(&compacted.entries);
-        assert!(after_estimate < before_estimate, "compaction should reduce estimate");
+        assert!(
+            after_estimate < before_estimate,
+            "compaction should reduce estimate"
+        );
     }
 
     #[tokio::test]
@@ -1203,10 +1269,17 @@ mod tests {
         }
 
         let estimate = assembler.estimate_tokens(&entries);
-        assert!(estimate > threshold, "setup: system overhead should exceed threshold");
+        assert!(
+            estimate > threshold,
+            "setup: system overhead should exceed threshold"
+        );
 
-        let result = maybe_compact(&entries, &assembler, "grok-3", Path::new("/project"), &mock).await;
-        assert!(result.is_none(), "should return None when above threshold but nothing compactable");
+        let result =
+            maybe_compact(&entries, &assembler, "grok-3", Path::new("/project"), &mock).await;
+        assert!(
+            result.is_none(),
+            "should return None when above threshold but nothing compactable"
+        );
     }
 
     #[tokio::test]
@@ -1226,7 +1299,10 @@ mod tests {
         let mock = MockGrokApi::new(vec![TurnResponse {
             text: "LLM summary of conversation.".into(),
             tool_calls: vec![],
-            usage: Some(crate::api::Usage { input_tokens: 2000, output_tokens: 500 }),
+            usage: Some(crate::api::Usage {
+                input_tokens: 2000,
+                output_tokens: 500,
+            }),
         }]);
 
         // Build transcript with big user messages that heuristic can't compact
@@ -1238,14 +1314,18 @@ mod tests {
             entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
         }
 
-        let result = maybe_compact(&entries, &assembler, "grok-3", Path::new("/project"), &mock).await;
+        let result =
+            maybe_compact(&entries, &assembler, "grok-3", Path::new("/project"), &mock).await;
         assert!(result.is_some(), "should compact via LLM");
 
         let compacted = result.unwrap();
         // Should have LLM usage since it escalated
         assert!(compacted.llm_usage.is_some(), "should have LLM usage");
         // First entry should be a CompactionSummary
-        assert!(matches!(&compacted.entries[0], TranscriptEntry::CompactionSummary { .. }));
+        assert!(matches!(
+            &compacted.entries[0],
+            TranscriptEntry::CompactionSummary { .. }
+        ));
     }
 
     #[tokio::test]
@@ -1265,7 +1345,10 @@ mod tests {
         let mock = MockGrokApi::new(vec![TurnResponse {
             text: verbose_summary,
             tool_calls: vec![],
-            usage: Some(crate::api::Usage { input_tokens: 5000, output_tokens: 3000 }),
+            usage: Some(crate::api::Usage {
+                input_tokens: 5000,
+                output_tokens: 3000,
+            }),
         }]);
 
         let mut entries = vec![
@@ -1276,7 +1359,8 @@ mod tests {
             entries.extend(simple_turn(&format!("q{i}"), &format!("a{i}")));
         }
 
-        let result = maybe_compact(&entries, &assembler, "grok-3", Path::new("/project"), &mock).await;
+        let result =
+            maybe_compact(&entries, &assembler, "grok-3", Path::new("/project"), &mock).await;
         assert!(result.is_some(), "should return Some to carry LLM usage");
 
         let compacted = result.unwrap();
@@ -1299,7 +1383,10 @@ mod tests {
         let mock = MockGrokApi::new(vec![TurnResponse {
             text: "## Primary Request\nUser wanted help.\n\n## Technical Concepts\nNone.".into(),
             tool_calls: vec![],
-            usage: Some(crate::api::Usage { input_tokens: 500, output_tokens: 200 }),
+            usage: Some(crate::api::Usage {
+                input_tokens: 500,
+                output_tokens: 200,
+            }),
         }]);
 
         let mut entries: Vec<TranscriptEntry> = Vec::new();
@@ -1311,12 +1398,16 @@ mod tests {
         assert!(result.compacted);
 
         // Should have CompactionSummary + recent 5 turns (10 entries)
-        assert!(matches!(&result.entries[0], TranscriptEntry::CompactionSummary { summary, .. } if summary.contains("Primary Request")));
+        assert!(
+            matches!(&result.entries[0], TranscriptEntry::CompactionSummary { summary, .. } if summary.contains("Primary Request"))
+        );
 
         // Recent entries should be preserved verbatim
-        let recent_user_msgs: Vec<_> = result.entries.iter().filter(|e| {
-            matches!(e, TranscriptEntry::UserMessage { .. })
-        }).collect();
+        let recent_user_msgs: Vec<_> = result
+            .entries
+            .iter()
+            .filter(|e| matches!(e, TranscriptEntry::UserMessage { .. }))
+            .collect();
         assert_eq!(recent_user_msgs.len(), 5);
     }
 
@@ -1328,7 +1419,10 @@ mod tests {
         let mock = MockGrokApi::new(vec![TurnResponse {
             text: "Summary.".into(),
             tool_calls: vec![],
-            usage: Some(crate::api::Usage { input_tokens: 1000, output_tokens: 300 }),
+            usage: Some(crate::api::Usage {
+                input_tokens: 1000,
+                output_tokens: 300,
+            }),
         }]);
 
         let mut entries: Vec<TranscriptEntry> = Vec::new();
@@ -1393,7 +1487,10 @@ mod tests {
         let mock = MockGrokApi::new(vec![TurnResponse {
             text: verbose_summary,
             tool_calls: vec![],
-            usage: Some(crate::api::Usage { input_tokens: 500, output_tokens: 5000 }),
+            usage: Some(crate::api::Usage {
+                input_tokens: 500,
+                output_tokens: 5000,
+            }),
         }]);
 
         // Small old entries — summary will be bigger
@@ -1432,7 +1529,14 @@ mod tests {
     #[test]
     fn turn_boundary_does_not_orphan_tool_calls() {
         // Turn with tool calls: User, ToolCall, ToolResult, Assistant = 4 entries
-        let mut entries = tool_turn("q0", "file_read", r#"{"path":"a.rs"}"#, "c0", "content", "a0");
+        let mut entries = tool_turn(
+            "q0",
+            "file_read",
+            r#"{"path":"a.rs"}"#,
+            "c0",
+            "content",
+            "a0",
+        );
         entries.extend(simple_turn("q1", "a1"));
         entries.extend(simple_turn("q2", "a2"));
         // 8 entries total. Midpoint is 4. UserMessages at indices 0, 4, 6.
@@ -1446,14 +1550,20 @@ mod tests {
         let older = &entries[..split];
         let newer = &entries[split..];
         for half in [older, newer] {
-            let calls: Vec<&str> = half.iter().filter_map(|e| match e {
-                TranscriptEntry::ToolCall { call_id, .. } => Some(call_id.as_str()),
-                _ => None,
-            }).collect();
-            let results: Vec<&str> = half.iter().filter_map(|e| match e {
-                TranscriptEntry::ToolResult { call_id, .. } => Some(call_id.as_str()),
-                _ => None,
-            }).collect();
+            let calls: Vec<&str> = half
+                .iter()
+                .filter_map(|e| match e {
+                    TranscriptEntry::ToolCall { call_id, .. } => Some(call_id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let results: Vec<&str> = half
+                .iter()
+                .filter_map(|e| match e {
+                    TranscriptEntry::ToolResult { call_id, .. } => Some(call_id.as_str()),
+                    _ => None,
+                })
+                .collect();
             for call_id in &calls {
                 assert!(results.contains(call_id), "orphaned ToolCall {call_id}");
             }
@@ -1507,13 +1617,19 @@ mod tests {
             TurnResponse {
                 text: "First half summary.".into(),
                 tool_calls: vec![],
-                usage: Some(crate::api::Usage { input_tokens: 5000, output_tokens: 500 }),
+                usage: Some(crate::api::Usage {
+                    input_tokens: 5000,
+                    output_tokens: 500,
+                }),
             },
             // Second pass: combine with newer half
             TurnResponse {
                 text: "Combined summary.".into(),
                 tool_calls: vec![],
-                usage: Some(crate::api::Usage { input_tokens: 3000, output_tokens: 400 }),
+                usage: Some(crate::api::Usage {
+                    input_tokens: 3000,
+                    output_tokens: 400,
+                }),
             },
         ]);
 
@@ -1531,7 +1647,11 @@ mod tests {
 
         // Should have made 2 API calls (chunked)
         let counts = mock.captured_input_counts.lock().unwrap();
-        assert_eq!(counts.len(), 2, "chunked summarization should make 2 API calls");
+        assert_eq!(
+            counts.len(),
+            2,
+            "chunked summarization should make 2 API calls"
+        );
 
         // Usage should be combined
         let usage = result.llm_usage.unwrap();
@@ -1551,13 +1671,14 @@ mod tests {
         use crate::api::TurnResponse;
         use crate::api::mock::CapturingMockGrokApi;
 
-        let mock = CapturingMockGrokApi::new(vec![
-            TurnResponse {
-                text: "Single pass summary.".into(),
-                tool_calls: vec![],
-                usage: Some(crate::api::Usage { input_tokens: 1000, output_tokens: 200 }),
-            },
-        ]);
+        let mock = CapturingMockGrokApi::new(vec![TurnResponse {
+            text: "Single pass summary.".into(),
+            tool_calls: vec![],
+            usage: Some(crate::api::Usage {
+                input_tokens: 1000,
+                output_tokens: 200,
+            }),
+        }]);
 
         // Entries with enough content so summary is smaller, but below 80% of context window
         let mut entries: Vec<TranscriptEntry> = Vec::new();
@@ -1570,7 +1691,11 @@ mod tests {
 
         // Should have made only 1 API call (not chunked)
         let counts = mock.captured_input_counts.lock().unwrap();
-        assert_eq!(counts.len(), 1, "should use single pass for small transcripts");
+        assert_eq!(
+            counts.len(),
+            1,
+            "should use single pass for small transcripts"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1601,9 +1726,11 @@ mod tests {
     #[test]
     fn format_entries_truncates_long_tool_output() {
         let long_output = "x".repeat(1000);
-        let entries = vec![
-            TranscriptEntry::tool_result("c1", "file_read", &long_output),
-        ];
+        let entries = vec![TranscriptEntry::tool_result(
+            "c1",
+            "file_read",
+            &long_output,
+        )];
 
         let text = format_entries_for_summarization(&entries);
         assert!(text.contains("(truncated)"));

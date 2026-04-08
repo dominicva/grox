@@ -62,8 +62,7 @@ impl ModelProfile {
             return None;
         }
         Some(
-            (input_tokens as f64 * self.input_price
-                + output_tokens as f64 * self.output_price)
+            (input_tokens as f64 * self.input_price + output_tokens as f64 * self.output_price)
                 / 1_000_000.0,
         )
     }

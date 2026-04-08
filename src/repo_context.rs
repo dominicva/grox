@@ -67,7 +67,11 @@ fn git_branch(root: &Path) -> Option<String> {
         return None;
     }
     let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if branch.is_empty() { None } else { Some(branch) }
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch)
+    }
 }
 
 fn git_status(root: &Path) -> Option<String> {
@@ -117,16 +121,18 @@ fn collect_tree(
         Err(_) => return,
     };
 
-    let mut items: Vec<_> = entries
-        .filter_map(|e| e.ok())
-        .collect();
+    let mut items: Vec<_> = entries.filter_map(|e| e.ok()).collect();
     items.sort_by_key(|e| e.file_name());
 
     for entry in items {
         let name = entry.file_name().to_string_lossy().to_string();
 
         // Skip hidden files/dirs and common noise
-        if name.starts_with('.') || name == "node_modules" || name == "target" || name == "__pycache__" {
+        if name.starts_with('.')
+            || name == "node_modules"
+            || name == "target"
+            || name == "__pycache__"
+        {
             continue;
         }
 
@@ -216,7 +222,8 @@ mod tests {
         // Create lots of files to exceed 10K
         for i in 0..500 {
             fs::write(
-                dir.path().join(format!("file_{i:04}_with_a_long_name_to_fill_space.txt")),
+                dir.path()
+                    .join(format!("file_{i:04}_with_a_long_name_to_fill_space.txt")),
                 "",
             )
             .unwrap();
@@ -225,7 +232,12 @@ mod tests {
         let ctx = RepoContext::gather(dir.path());
         assert!(ctx.truncated);
         assert!(ctx.text.contains("truncated"));
-        assert!(ctx.text.len() <= MAX_CHARS, "truncated text ({} bytes) should not exceed MAX_CHARS ({})", ctx.text.len(), MAX_CHARS);
+        assert!(
+            ctx.text.len() <= MAX_CHARS,
+            "truncated text ({} bytes) should not exceed MAX_CHARS ({})",
+            ctx.text.len(),
+            MAX_CHARS
+        );
     }
 
     #[test]

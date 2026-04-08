@@ -80,32 +80,56 @@ impl TranscriptEntry {
     pub fn user_message(content: impl Into<String>) -> Self {
         let content = content.into();
         let token_estimate = content.len() / 4;
-        Self::UserMessage { content, token_estimate }
+        Self::UserMessage {
+            content,
+            token_estimate,
+        }
     }
 
     /// Create an AssistantMessage with auto-calculated token estimate.
     pub fn assistant_message(content: impl Into<String>) -> Self {
         let content = content.into();
         let token_estimate = content.len() / 4;
-        Self::AssistantMessage { content, token_estimate }
+        Self::AssistantMessage {
+            content,
+            token_estimate,
+        }
     }
 
     /// Create a ToolCall with auto-calculated token estimate.
-    pub fn tool_call(call_id: impl Into<String>, name: impl Into<String>, arguments: impl Into<String>) -> Self {
+    pub fn tool_call(
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+    ) -> Self {
         let call_id = call_id.into();
         let name = name.into();
         let arguments = arguments.into();
         let token_estimate = (call_id.len() + name.len() + arguments.len()) / 4;
-        Self::ToolCall { call_id, name, arguments, token_estimate }
+        Self::ToolCall {
+            call_id,
+            name,
+            arguments,
+            token_estimate,
+        }
     }
 
     /// Create a ToolResult with auto-calculated token estimate.
-    pub fn tool_result(call_id: impl Into<String>, name: impl Into<String>, output: impl Into<String>) -> Self {
+    pub fn tool_result(
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        output: impl Into<String>,
+    ) -> Self {
         let call_id = call_id.into();
         let name = name.into();
         let output = output.into();
         let token_estimate = (call_id.len() + name.len() + output.len()) / 4;
-        Self::ToolResult { call_id, name, output, token_estimate }
+        Self::ToolResult {
+            call_id,
+            name,
+            output,
+            token_estimate,
+        }
     }
 
     /// Create a CompactionSummary with auto-calculated token estimate.
@@ -113,7 +137,10 @@ impl TranscriptEntry {
     pub fn compaction_summary(summary: impl Into<String>) -> Self {
         let summary = summary.into();
         let token_estimate = summary.len() / 4;
-        Self::CompactionSummary { summary, token_estimate }
+        Self::CompactionSummary {
+            summary,
+            token_estimate,
+        }
     }
 
     /// Create a SystemEvent with auto-calculated token estimate.
@@ -121,17 +148,25 @@ impl TranscriptEntry {
     pub fn system_event(event: impl Into<String>) -> Self {
         let event = event.into();
         let token_estimate = event.len() / 4;
-        Self::SystemEvent { event, token_estimate }
+        Self::SystemEvent {
+            event,
+            token_estimate,
+        }
     }
 
     /// Create a Checkpoint with auto-calculated token estimate.
     pub fn checkpoint(snapshots: Vec<FileSnapshot>, has_shell_exec: bool) -> Self {
         // Estimate based on serialized snapshot data
-        let content_len: usize = snapshots.iter().map(|s| {
-            s.path.len() + s.pre_hash.len() + s.post_hash.len()
-        }).sum();
+        let content_len: usize = snapshots
+            .iter()
+            .map(|s| s.path.len() + s.pre_hash.len() + s.post_hash.len())
+            .sum();
         let token_estimate = content_len / 4;
-        Self::Checkpoint { snapshots, has_shell_exec, token_estimate }
+        Self::Checkpoint {
+            snapshots,
+            has_shell_exec,
+            token_estimate,
+        }
     }
 }
 
@@ -183,8 +218,7 @@ impl Transcript {
             .open(&self.path)
             .with_context(|| format!("Failed to open transcript: {}", self.path.display()))?;
 
-        let line = serde_json::to_string(entry)
-            .context("Failed to serialize transcript entry")?;
+        let line = serde_json::to_string(entry).context("Failed to serialize transcript entry")?;
         writeln!(file, "{line}")
             .with_context(|| format!("Failed to write to transcript: {}", self.path.display()))?;
         file.sync_all()
@@ -237,8 +271,8 @@ impl Transcript {
             let mut file = std::fs::File::create(&tmp_path)
                 .with_context(|| format!("Failed to create temp file: {}", tmp_path.display()))?;
             for entry in entries {
-                let line = serde_json::to_string(entry)
-                    .context("Failed to serialize transcript entry")?;
+                let line =
+                    serde_json::to_string(entry).context("Failed to serialize transcript entry")?;
                 writeln!(file, "{line}")?;
             }
             file.sync_all()?;
@@ -301,22 +335,25 @@ impl SessionMeta {
 
     /// Atomically save this metadata to disk (write-to-temp-then-rename).
     pub fn save(&self, sessions_dir: &Path) -> Result<()> {
-        std::fs::create_dir_all(sessions_dir)
-            .with_context(|| format!("Failed to create sessions dir: {}", sessions_dir.display()))?;
+        std::fs::create_dir_all(sessions_dir).with_context(|| {
+            format!("Failed to create sessions dir: {}", sessions_dir.display())
+        })?;
 
         let path = Self::meta_path(sessions_dir, &self.session_id);
         let tmp_path = path.with_extension("meta.json.tmp");
 
-        let json = serde_json::to_string_pretty(self)
-            .context("Failed to serialize session metadata")?;
+        let json =
+            serde_json::to_string_pretty(self).context("Failed to serialize session metadata")?;
 
         {
             let file = std::fs::File::create(&tmp_path)
                 .with_context(|| format!("Failed to create temp file: {}", tmp_path.display()))?;
             let mut writer = std::io::BufWriter::new(file);
-            writer.write_all(json.as_bytes())
+            writer
+                .write_all(json.as_bytes())
                 .with_context(|| format!("Failed to write temp file: {}", tmp_path.display()))?;
-            writer.into_inner()
+            writer
+                .into_inner()
                 .map_err(|e| anyhow::anyhow!("Failed to flush temp file: {}", e))?
                 .sync_all()
                 .with_context(|| format!("Failed to sync temp file: {}", tmp_path.display()))?;
@@ -362,8 +399,9 @@ impl SessionIndex {
     /// List all sessions, sorted by last_active (most recent first).
     /// Creates the sessions directory if it doesn't exist.
     pub fn list(sessions_dir: &Path) -> Result<Vec<SessionMeta>> {
-        std::fs::create_dir_all(sessions_dir)
-            .with_context(|| format!("Failed to create sessions dir: {}", sessions_dir.display()))?;
+        std::fs::create_dir_all(sessions_dir).with_context(|| {
+            format!("Failed to create sessions dir: {}", sessions_dir.display())
+        })?;
 
         let mut sessions = Vec::new();
 
@@ -393,7 +431,10 @@ impl SessionIndex {
     /// List sessions filtered to a specific project root.
     pub fn list_for_project(sessions_dir: &Path, project_root: &str) -> Result<Vec<SessionMeta>> {
         let all = Self::list(sessions_dir)?;
-        Ok(all.into_iter().filter(|s| s.project_root == project_root).collect())
+        Ok(all
+            .into_iter()
+            .filter(|s| s.project_root == project_root)
+            .collect())
     }
 }
 
@@ -492,9 +533,9 @@ mod tests {
     fn checkpoint_token_estimate() {
         let entry = TranscriptEntry::checkpoint(
             vec![FileSnapshot {
-                path: "src/main.rs".to_string(),      // 11
-                pre_hash: "a".repeat(40),              // 40
-                post_hash: "b".repeat(40),             // 40
+                path: "src/main.rs".to_string(), // 11
+                pre_hash: "a".repeat(40),        // 40
+                post_hash: "b".repeat(40),       // 40
             }],
             false,
         );
@@ -624,9 +665,15 @@ mod tests {
         let transcript = Transcript::new(&path);
 
         // Write initial entries
-        transcript.append(&TranscriptEntry::user_message("old1")).unwrap();
-        transcript.append(&TranscriptEntry::user_message("old2")).unwrap();
-        transcript.append(&TranscriptEntry::user_message("old3")).unwrap();
+        transcript
+            .append(&TranscriptEntry::user_message("old1"))
+            .unwrap();
+        transcript
+            .append(&TranscriptEntry::user_message("old2"))
+            .unwrap();
+        transcript
+            .append(&TranscriptEntry::user_message("old3"))
+            .unwrap();
 
         // Atomic rewrite with fewer entries
         let new_entries = vec![
@@ -663,10 +710,15 @@ mod tests {
         let path = dir.path().join("cleanup.jsonl");
         let transcript = Transcript::new(&path);
 
-        transcript.atomic_rewrite(&[TranscriptEntry::user_message("test")]).unwrap();
+        transcript
+            .atomic_rewrite(&[TranscriptEntry::user_message("test")])
+            .unwrap();
 
         let tmp_path = path.with_extension("jsonl.tmp");
-        assert!(!tmp_path.exists(), "temp file should not exist after successful rewrite");
+        assert!(
+            !tmp_path.exists(),
+            "temp file should not exist after successful rewrite"
+        );
     }
 
     #[test]
@@ -675,7 +727,9 @@ mod tests {
         let path = dir.path().join("deep").join("nested").join("test.jsonl");
         let transcript = Transcript::new(&path);
 
-        transcript.append(&TranscriptEntry::user_message("hello")).unwrap();
+        transcript
+            .append(&TranscriptEntry::user_message("hello"))
+            .unwrap();
         assert!(path.exists());
     }
 
@@ -701,7 +755,9 @@ mod tests {
         let transcript = Transcript::new(&path);
 
         transcript.create().unwrap();
-        transcript.append(&TranscriptEntry::user_message("hello")).unwrap();
+        transcript
+            .append(&TranscriptEntry::user_message("hello"))
+            .unwrap();
         transcript.create().unwrap(); // should not truncate
 
         let entries = transcript.read_all().unwrap();
@@ -756,8 +812,8 @@ mod tests {
         meta.save(&sessions_dir).unwrap();
 
         // Check no temp file lingers
-        let tmp_path = SessionMeta::meta_path(&sessions_dir, &meta.session_id)
-            .with_extension("meta.json.tmp");
+        let tmp_path =
+            SessionMeta::meta_path(&sessions_dir, &meta.session_id).with_extension("meta.json.tmp");
         assert!(!tmp_path.exists());
     }
 
@@ -786,15 +842,21 @@ mod tests {
         let sessions_dir = dir.path().join("sessions");
 
         let mut meta1 = SessionMeta::new("grok-3", "/project");
-        meta1.last_active = DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z").unwrap().into();
+        meta1.last_active = DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
+            .unwrap()
+            .into();
         meta1.save(&sessions_dir).unwrap();
 
         let mut meta2 = SessionMeta::new("grok-3", "/project");
-        meta2.last_active = DateTime::parse_from_rfc3339("2025-06-01T00:00:00Z").unwrap().into();
+        meta2.last_active = DateTime::parse_from_rfc3339("2025-06-01T00:00:00Z")
+            .unwrap()
+            .into();
         meta2.save(&sessions_dir).unwrap();
 
         let mut meta3 = SessionMeta::new("grok-3", "/project");
-        meta3.last_active = DateTime::parse_from_rfc3339("2025-03-15T00:00:00Z").unwrap().into();
+        meta3.last_active = DateTime::parse_from_rfc3339("2025-03-15T00:00:00Z")
+            .unwrap()
+            .into();
         meta3.save(&sessions_dir).unwrap();
 
         let sessions = SessionIndex::list(&sessions_dir).unwrap();
@@ -877,7 +939,10 @@ mod tests {
         let meta = SessionMeta::new("grok-3", "/test/project");
         meta.save(&sessions_dir).unwrap();
 
-        let transcript = Transcript::new(SessionMeta::transcript_path(&sessions_dir, &meta.session_id));
+        let transcript = Transcript::new(SessionMeta::transcript_path(
+            &sessions_dir,
+            &meta.session_id,
+        ));
         let entries = vec![
             TranscriptEntry::user_message("hello"),
             TranscriptEntry::assistant_message("hi there"),
@@ -893,9 +958,10 @@ mod tests {
 
         // Simulate resume: load metadata, read transcript
         let loaded_meta = SessionMeta::load(&sessions_dir, &meta.session_id).unwrap();
-        let loaded_transcript = Transcript::new(
-            SessionMeta::transcript_path(&sessions_dir, &loaded_meta.session_id),
-        );
+        let loaded_transcript = Transcript::new(SessionMeta::transcript_path(
+            &sessions_dir,
+            &loaded_meta.session_id,
+        ));
         let loaded_entries = loaded_transcript.read_all().unwrap();
 
         assert_eq!(loaded_meta.session_id, meta.session_id);
@@ -911,9 +977,16 @@ mod tests {
         let meta = SessionMeta::new("grok-3", "/test");
         meta.save(&sessions_dir).unwrap();
 
-        let transcript = Transcript::new(SessionMeta::transcript_path(&sessions_dir, &meta.session_id));
-        transcript.append(&TranscriptEntry::user_message("first")).unwrap();
-        transcript.append(&TranscriptEntry::assistant_message("response")).unwrap();
+        let transcript = Transcript::new(SessionMeta::transcript_path(
+            &sessions_dir,
+            &meta.session_id,
+        ));
+        transcript
+            .append(&TranscriptEntry::user_message("first"))
+            .unwrap();
+        transcript
+            .append(&TranscriptEntry::assistant_message("response"))
+            .unwrap();
 
         // Simulate resume: read existing entries
         let mut history = transcript.read_all().unwrap();
@@ -936,19 +1009,26 @@ mod tests {
         let sessions_dir = dir.path().join("sessions");
 
         let mut old = SessionMeta::new("grok-3", "/my/project");
-        old.last_active = DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z").unwrap().into();
+        old.last_active = DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
+            .unwrap()
+            .into();
         old.save(&sessions_dir).unwrap();
 
         let mut recent = SessionMeta::new("grok-3", "/my/project");
-        recent.last_active = DateTime::parse_from_rfc3339("2025-06-01T00:00:00Z").unwrap().into();
+        recent.last_active = DateTime::parse_from_rfc3339("2025-06-01T00:00:00Z")
+            .unwrap()
+            .into();
         recent.save(&sessions_dir).unwrap();
 
         // Different project — should not be selected
         let mut other = SessionMeta::new("grok-3", "/other/project");
-        other.last_active = DateTime::parse_from_rfc3339("2025-12-01T00:00:00Z").unwrap().into();
+        other.last_active = DateTime::parse_from_rfc3339("2025-12-01T00:00:00Z")
+            .unwrap()
+            .into();
         other.save(&sessions_dir).unwrap();
 
-        let project_sessions = SessionIndex::list_for_project(&sessions_dir, "/my/project").unwrap();
+        let project_sessions =
+            SessionIndex::list_for_project(&sessions_dir, "/my/project").unwrap();
         let most_recent = project_sessions.first().unwrap();
         assert_eq!(most_recent.session_id, recent.session_id);
     }
@@ -963,7 +1043,8 @@ mod tests {
 
         let prefix = &meta.session_id[..8];
         let all = SessionIndex::list(&sessions_dir).unwrap();
-        let matches: Vec<_> = all.into_iter()
+        let matches: Vec<_> = all
+            .into_iter()
             .filter(|s| s.session_id.starts_with(prefix))
             .collect();
         assert_eq!(matches.len(), 1);
@@ -980,7 +1061,10 @@ mod tests {
         meta.save(&sessions_dir).unwrap();
 
         // Reading a missing transcript should return empty, not error
-        let transcript = Transcript::new(SessionMeta::transcript_path(&sessions_dir, &meta.session_id));
+        let transcript = Transcript::new(SessionMeta::transcript_path(
+            &sessions_dir,
+            &meta.session_id,
+        ));
         let entries = transcript.read_all().unwrap();
         assert!(entries.is_empty());
     }
@@ -1016,7 +1100,11 @@ mod tests {
 
         // Valid entry followed by corrupt data
         let transcript_path = SessionMeta::transcript_path(&sessions_dir, &meta.session_id);
-        std::fs::write(&transcript_path, format!("{valid_json}\ncorrupt data here\n")).unwrap();
+        std::fs::write(
+            &transcript_path,
+            format!("{valid_json}\ncorrupt data here\n"),
+        )
+        .unwrap();
 
         let transcript = Transcript::new(&transcript_path);
         let entries = transcript.read_all().unwrap();

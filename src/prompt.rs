@@ -161,7 +161,11 @@ mod tests {
 
     #[test]
     fn prompt_includes_repo_context_when_provided() {
-        let prompt = build_system_prompt(Path::new("/test"), Some("Branch: main\nStatus: clean"), None);
+        let prompt = build_system_prompt(
+            Path::new("/test"),
+            Some("Branch: main\nStatus: clean"),
+            None,
+        );
         assert!(prompt.contains("# Repository context"));
         assert!(prompt.contains("Branch: main"));
     }
@@ -181,7 +185,10 @@ mod tests {
         );
         let ctx_pos = prompt.find("Repository context").unwrap();
         let grox_pos = prompt.find("GROX.md").unwrap();
-        assert!(ctx_pos < grox_pos, "repo context should appear before GROX.md");
+        assert!(
+            ctx_pos < grox_pos,
+            "repo context should appear before GROX.md"
+        );
     }
 
     #[test]

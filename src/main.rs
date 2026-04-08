@@ -21,8 +21,8 @@ use colored::Colorize;
 use context_assembler::ContextAssembler;
 use permissions::{PermissionMode, SessionPermissions};
 use rustyline::DefaultEditor;
-use session::{SessionIndex, SessionMeta, Transcript, TranscriptEntry};
 use serde_json::json;
+use session::{SessionIndex, SessionMeta, Transcript, TranscriptEntry};
 use std::io::{Write, stdout};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
@@ -76,8 +76,9 @@ async fn main() -> Result<()> {
     };
 
     let user_specified_model = cli.model.is_some() || std::env::var("GROX_MODEL").is_ok();
-    let model = cli.model
-        .unwrap_or_else(|| std::env::var("GROX_MODEL").unwrap_or_else(|_| "grok-3-fast".to_string()));
+    let model = cli.model.unwrap_or_else(|| {
+        std::env::var("GROX_MODEL").unwrap_or_else(|_| "grok-3-fast".to_string())
+    });
 
     if cli.verbose {
         // SAFETY: called once at startup before any threads are spawned
@@ -99,38 +100,56 @@ async fn main() -> Result<()> {
 
     // --- Session setup ---
     let sessions_dir = SessionIndex::default_sessions_dir()?;
-    let (mut session_meta, mut transcript, mut history, resumed) = if let Some(ref resume_arg) = cli.resume {
+    let (mut session_meta, mut transcript, mut history, resumed) = if let Some(ref resume_arg) =
+        cli.resume
+    {
         // Resume an existing session
         let resume_id = resume_arg.trim();
         let meta = if resume_id.is_empty() {
             // No ID specified — resume most recent session for this project
-            let project_sessions = SessionIndex::list_for_project(
-                &sessions_dir,
-                &project_root.display().to_string(),
-            )?;
+            let project_sessions =
+                SessionIndex::list_for_project(&sessions_dir, &project_root.display().to_string())?;
             match project_sessions.into_iter().next() {
                 Some(m) => m,
                 None => {
-                    eprintln!("{}", "no previous sessions found for this project".red().bold());
+                    eprintln!(
+                        "{}",
+                        "no previous sessions found for this project".red().bold()
+                    );
                     std::process::exit(1);
                 }
             }
         } else {
             // ID specified — find by prefix match
             let all = SessionIndex::list(&sessions_dir)?;
-            let matches: Vec<_> = all.into_iter()
+            let matches: Vec<_> = all
+                .into_iter()
                 .filter(|s| s.session_id.starts_with(resume_id))
                 .collect();
             match matches.len() {
                 0 => {
-                    eprintln!("{}", format!("no session found matching '{resume_id}'").red().bold());
+                    eprintln!(
+                        "{}",
+                        format!("no session found matching '{resume_id}'")
+                            .red()
+                            .bold()
+                    );
                     std::process::exit(1);
                 }
                 1 => matches.into_iter().next().unwrap(),
                 n => {
-                    eprintln!("{}", format!("'{resume_id}' matches {n} sessions — be more specific:").red().bold());
+                    eprintln!(
+                        "{}",
+                        format!("'{resume_id}' matches {n} sessions — be more specific:")
+                            .red()
+                            .bold()
+                    );
                     for m in &matches {
-                        eprintln!("  {} ({})", &m.session_id[..8], m.last_active.format("%Y-%m-%d %H:%M"));
+                        eprintln!(
+                            "  {} ({})",
+                            &m.session_id[..8],
+                            m.last_active.format("%Y-%m-%d %H:%M")
+                        );
                     }
                     std::process::exit(1);
                 }
@@ -144,13 +163,15 @@ async fn main() -> Result<()> {
                 "{}",
                 format!(
                     "  warning: session {} was created in '{}', but you are in '{}'",
-                    &meta.session_id[..8], meta.project_root, current_project
-                ).yellow()
+                    &meta.session_id[..8],
+                    meta.project_root,
+                    current_project
+                )
+                .yellow()
             );
             eprintln!(
                 "{}",
-                "  tools will operate on the current directory, not the original project"
-                    .yellow()
+                "  tools will operate on the current directory, not the original project".yellow()
             );
         }
 
@@ -166,9 +187,18 @@ async fn main() -> Result<()> {
             );
             t.create()?;
         }
-        let entries = t.read_all()
-            .with_context(|| format!("failed to read transcript for session {}", &meta.session_id[..8]))?;
-        if transcript_path.exists() && entries.is_empty() && std::fs::metadata(&transcript_path).map(|m| m.len() > 0).unwrap_or(false) {
+        let entries = t.read_all().with_context(|| {
+            format!(
+                "failed to read transcript for session {}",
+                &meta.session_id[..8]
+            )
+        })?;
+        if transcript_path.exists()
+            && entries.is_empty()
+            && std::fs::metadata(&transcript_path)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
+        {
             eprintln!(
                 "{}",
                 format!(
@@ -181,7 +211,10 @@ async fn main() -> Result<()> {
     } else {
         // New session
         let meta = SessionMeta::new(&model, project_root.display().to_string());
-        let t = Transcript::new(SessionMeta::transcript_path(&sessions_dir, &meta.session_id));
+        let t = Transcript::new(SessionMeta::transcript_path(
+            &sessions_dir,
+            &meta.session_id,
+        ));
         t.create()?;
         meta.save(&sessions_dir)?;
         (meta, t, Vec::new(), false)
@@ -216,8 +249,14 @@ async fn main() -> Result<()> {
             format!("session: {} (resumed)", &session_meta.session_id[..8]).dimmed()
         );
         // Show brief summary of previous state
-        let user_turns = history.iter().filter(|e| matches!(e, TranscriptEntry::UserMessage { .. })).count();
-        let assistant_turns = history.iter().filter(|e| matches!(e, TranscriptEntry::AssistantMessage { .. })).count();
+        let user_turns = history
+            .iter()
+            .filter(|e| matches!(e, TranscriptEntry::UserMessage { .. }))
+            .count();
+        let assistant_turns = history
+            .iter()
+            .filter(|e| matches!(e, TranscriptEntry::AssistantMessage { .. }))
+            .count();
         println!(
             "{}",
             format!(
@@ -225,7 +264,8 @@ async fn main() -> Result<()> {
                 user_turns,
                 assistant_turns,
                 session_meta.last_active.format("%Y-%m-%d %H:%M UTC")
-            ).dimmed()
+            )
+            .dimmed()
         );
     } else {
         println!(
@@ -244,8 +284,7 @@ async fn main() -> Result<()> {
     if repo_ctx.truncated {
         eprintln!(
             "{}",
-            "  warning: repo context exceeds 10K characters and was truncated"
-                .yellow()
+            "  warning: repo context exceeds 10K characters and was truncated".yellow()
         );
     }
 
@@ -256,17 +295,17 @@ async fn main() -> Result<()> {
     {
         eprintln!(
             "{}",
-            "  warning: GROX.md exceeds 10K characters and was truncated"
-                .yellow()
+            "  warning: GROX.md exceeds 10K characters and was truncated".yellow()
         );
     }
 
-    let repo_ctx_text = if repo_ctx.text.is_empty() { None } else { Some(repo_ctx.text.as_str()) };
-    let system_content = prompt::build_system_prompt(
-        &project_root,
-        repo_ctx_text,
-        grox_md.as_deref(),
-    );
+    let repo_ctx_text = if repo_ctx.text.is_empty() {
+        None
+    } else {
+        Some(repo_ctx.text.as_str())
+    };
+    let system_content =
+        prompt::build_system_prompt(&project_root, repo_ctx_text, grox_md.as_deref());
 
     let system_prompt = json!({
         "role": "system",
@@ -281,8 +320,7 @@ async fn main() -> Result<()> {
         let input = match rl.readline(&format!("{} ", ">>".green().bold())) {
             Ok(line) => line,
             Err(
-                rustyline::error::ReadlineError::Interrupted
-                | rustyline::error::ReadlineError::Eof,
+                rustyline::error::ReadlineError::Interrupted | rustyline::error::ReadlineError::Eof,
             ) => break,
             Err(e) => return Err(e.into()),
         };
@@ -392,7 +430,11 @@ async fn main() -> Result<()> {
                 Ok(sessions) => {
                     println!("  {}", "recent sessions:".bold());
                     for (i, s) in sessions.iter().take(10).enumerate() {
-                        let active = if s.session_id == session_meta.session_id { " (current)" } else { "" };
+                        let active = if s.session_id == session_meta.session_id {
+                            " (current)"
+                        } else {
+                            ""
+                        };
                         let summary_part = if s.summary.is_empty() {
                             String::new()
                         } else {
@@ -433,13 +475,17 @@ async fn main() -> Result<()> {
                     continue;
                 }
             };
-            let matches: Vec<_> = all.into_iter()
+            let matches: Vec<_> = all
+                .into_iter()
                 .filter(|s| s.session_id.starts_with(id_arg))
                 .collect();
 
             match matches.len() {
                 0 => {
-                    println!("{}", format!("  no session found matching '{id_arg}'").dimmed());
+                    println!(
+                        "{}",
+                        format!("  no session found matching '{id_arg}'").dimmed()
+                    );
                 }
                 1 => {
                     let target = &matches[0];
@@ -458,16 +504,26 @@ async fn main() -> Result<()> {
                             ).yellow()
                         );
                     }
-                    let t = Transcript::new(SessionMeta::transcript_path(&sessions_dir, &target.session_id));
+                    let t = Transcript::new(SessionMeta::transcript_path(
+                        &sessions_dir,
+                        &target.session_id,
+                    ));
                     match t.read_all() {
                         Ok(entries) => {
-                            let user_turns = entries.iter().filter(|e| matches!(e, TranscriptEntry::UserMessage { .. })).count();
-                            let assistant_turns = entries.iter().filter(|e| matches!(e, TranscriptEntry::AssistantMessage { .. })).count();
+                            let user_turns = entries
+                                .iter()
+                                .filter(|e| matches!(e, TranscriptEntry::UserMessage { .. }))
+                                .count();
+                            let assistant_turns = entries
+                                .iter()
+                                .filter(|e| matches!(e, TranscriptEntry::AssistantMessage { .. }))
+                                .count();
                             session_meta = target.clone();
                             history = entries;
-                            transcript = Transcript::new(
-                                SessionMeta::transcript_path(&sessions_dir, &session_meta.session_id),
-                            );
+                            transcript = Transcript::new(SessionMeta::transcript_path(
+                                &sessions_dir,
+                                &session_meta.session_id,
+                            ));
                             // Restore saved model unless user explicitly set one
                             if session_meta.model != client.model() {
                                 client.set_model(session_meta.model.clone());
@@ -490,9 +546,16 @@ async fn main() -> Result<()> {
                     }
                 }
                 n => {
-                    println!("{}", format!("  '{id_arg}' matches {n} sessions — be more specific:").dimmed());
+                    println!(
+                        "{}",
+                        format!("  '{id_arg}' matches {n} sessions — be more specific:").dimmed()
+                    );
                     for m in &matches {
-                        println!("    {} ({})", &m.session_id[..8], m.last_active.format("%Y-%m-%d %H:%M"));
+                        println!(
+                            "    {} ({})",
+                            &m.session_id[..8],
+                            m.last_active.format("%Y-%m-%d %H:%M")
+                        );
                     }
                 }
             }
@@ -506,7 +569,8 @@ async fn main() -> Result<()> {
             // Try heuristic first
             let heuristic = compaction::heuristic_compact(&history, &project_root);
             let after_heuristic = assembler.estimate_tokens(&heuristic.entries);
-            let threshold = model_profile::ModelProfile::for_model(client.model()).compaction_threshold();
+            let threshold =
+                model_profile::ModelProfile::for_model(client.model()).compaction_threshold();
 
             // If still over threshold after heuristic, escalate to LLM compaction
             let result = if after_heuristic > threshold {
@@ -520,7 +584,10 @@ async fn main() -> Result<()> {
                         }
                     }
                     Err(e) => {
-                        eprintln!("{}", format!("  warning: LLM compaction failed: {e}").yellow());
+                        eprintln!(
+                            "{}",
+                            format!("  warning: LLM compaction failed: {e}").yellow()
+                        );
                         heuristic
                     }
                 }
@@ -558,7 +625,11 @@ async fn main() -> Result<()> {
                     profile.estimate_cost(u.input_tokens, u.output_tokens)
                 });
                 if let Some(cost) = llm_cost {
-                    println!("{}", format!("  nothing to compact (LLM summarization attempt: ~${cost:.4})").yellow());
+                    println!(
+                        "{}",
+                        format!("  nothing to compact (LLM summarization attempt: ~${cost:.4})")
+                            .yellow()
+                    );
                 } else {
                     println!("{}", "  nothing to compact".dimmed());
                 }
@@ -578,7 +649,10 @@ async fn main() -> Result<()> {
         let _ = session_meta.save(&sessions_dir);
 
         // Preflight budget check: compact if estimated tokens exceed threshold
-        if let Some(result) = compaction::maybe_compact(&history, &assembler, client.model(), &project_root, &client).await {
+        if let Some(result) =
+            compaction::maybe_compact(&history, &assembler, client.model(), &project_root, &client)
+                .await
+        {
             // Always account for LLM usage even if compaction didn't reduce size
             if let Some(u) = &result.llm_usage {
                 session_meta.cumulative_input_tokens += u.input_tokens;
@@ -588,7 +662,8 @@ async fn main() -> Result<()> {
             if result.compacted {
                 let old_estimate = assembler.estimate_tokens(&history);
                 let new_estimate = assembler.estimate_tokens(&result.entries);
-                let threshold = model_profile::ModelProfile::for_model(client.model()).compaction_threshold();
+                let threshold =
+                    model_profile::ModelProfile::for_model(client.model()).compaction_threshold();
                 let llm_cost = result.llm_usage.as_ref().and_then(|u| {
                     let profile = model_profile::ModelProfile::for_model(client.model());
                     profile.estimate_cost(u.input_tokens, u.output_tokens)
@@ -653,7 +728,8 @@ async fn main() -> Result<()> {
                             if total > MAX_DISPLAY_LINES {
                                 println!(
                                     "  {}",
-                                    format!("... ({} more lines)", total - MAX_DISPLAY_LINES).dimmed()
+                                    format!("... ({} more lines)", total - MAX_DISPLAY_LINES)
+                                        .dimmed()
                                 );
                             }
                         }
@@ -675,9 +751,7 @@ async fn main() -> Result<()> {
                         println!("{}", summary.dimmed());
                     }
                 },
-                &mut |name: &str, args: &str| -> bool {
-                    session_perms.authorize(name, args)
-                },
+                &mut |name: &str, args: &str| -> bool { session_perms.authorize(name, args) },
                 &mut || {
                     // Refresh repo context after mutating tools
                     let fresh_ctx = repo_context::RepoContext::gather(&project_root);
@@ -711,10 +785,7 @@ async fn main() -> Result<()> {
         {
             Ok(result) => {
                 if result.text.is_empty() {
-                    println!(
-                        "{}",
-                        "(no response from model)".dimmed()
-                    );
+                    println!("{}", "(no response from model)".dimmed());
                 }
                 println!();
 
@@ -813,9 +884,7 @@ fn format_edit_context(output: &str) {
 fn summarize_tool_call(name: &str, args: &str) -> String {
     let parsed: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
     match name {
-        "file_read" | "list_files" => {
-            parsed["path"].as_str().unwrap_or("?").to_string()
-        }
+        "file_read" | "list_files" => parsed["path"].as_str().unwrap_or("?").to_string(),
         "grep" => {
             let pattern = parsed["pattern"].as_str().unwrap_or("?");
             let path = parsed["path"].as_str().unwrap_or(".");

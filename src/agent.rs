@@ -49,6 +49,7 @@ impl<'a> Agent<'a> {
     ///
     /// `on_context_refresh` is called after mutating tools execute. It should return
     /// a fresh system prompt (with updated repo context) to replace the existing one.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run(
         &self,
         input: Vec<Value>,
@@ -69,11 +70,7 @@ impl<'a> Agent<'a> {
         for _turn in 0..MAX_TURNS {
             let response = self
                 .api
-                .send_turn(
-                    messages.clone(),
-                    &self.tool_defs,
-                    on_token,
-                )
+                .send_turn(messages.clone(), &self.tool_defs, on_token)
                 .await?;
 
             // Accumulate usage across all inner iterations
@@ -138,10 +135,8 @@ impl<'a> Agent<'a> {
                     checkpoint::extract_tool_path(&tc.arguments).and_then(|path| {
                         let abs_path =
                             checkpoint::resolve_checkpoint_path(&path, &self.project_root);
-                        let canonical = checkpoint::validate_checkpoint_path(
-                            &abs_path,
-                            &self.project_root,
-                        )?;
+                        let canonical =
+                            checkpoint::validate_checkpoint_path(&abs_path, &self.project_root)?;
                         let pre = checkpoint::snapshot_pre(&canonical, &self.project_root).ok()?;
                         Some((canonical, pre))
                     })
@@ -175,20 +170,18 @@ impl<'a> Agent<'a> {
                 // Rewind processes all checkpoints in reverse order, so
                 // multiple edits to the same file are handled correctly
                 // without explicit dedup.
-                if let Some((canonical, pre)) = pre_snapshot {
-                    if let Ok(post) =
-                        checkpoint::snapshot_post(&canonical, &self.project_root)
-                    {
-                        let cp = TranscriptEntry::checkpoint(
-                            vec![FileSnapshot {
-                                path: canonical.display().to_string(),
-                                pre_hash: pre,
-                                post_hash: post,
-                            }],
-                            turn_had_shell_exec,
-                        );
-                        on_entry(&cp)?;
-                    }
+                if let Some((canonical, pre)) = pre_snapshot
+                    && let Ok(post) = checkpoint::snapshot_post(&canonical, &self.project_root)
+                {
+                    let cp = TranscriptEntry::checkpoint(
+                        vec![FileSnapshot {
+                            path: canonical.display().to_string(),
+                            pre_hash: pre,
+                            post_hash: post,
+                        }],
+                        turn_had_shell_exec,
+                    );
+                    on_entry(&cp)?;
                 }
 
                 on_tool_result(&tc.name, &output);
@@ -234,14 +227,23 @@ mod tests {
     fn noop_token(_: String) {}
     fn noop_tool_call(_: &str, _: &str) {}
     fn noop_tool_result(_: &str, _: &str) {}
-    fn allow_all(_: &str, _: &str) -> bool { true }
-    fn no_refresh() -> Value { json!({"role": "system", "content": "test"}) }
-    fn noop_entry(_: &TranscriptEntry) -> Result<()> { Ok(()) }
+    fn allow_all(_: &str, _: &str) -> bool {
+        true
+    }
+    fn no_refresh() -> Value {
+        json!({"role": "system", "content": "test"})
+    }
+    fn noop_entry(_: &TranscriptEntry) -> Result<()> {
+        Ok(())
+    }
+
+    type EntryStore = std::sync::Arc<std::sync::Mutex<Vec<TranscriptEntry>>>;
 
     /// Collect entries emitted via on_entry callback.
+    #[allow(clippy::type_complexity)]
     fn collecting_entries() -> (
         impl FnMut(&TranscriptEntry) -> Result<()> + Send,
-        std::sync::Arc<std::sync::Mutex<Vec<TranscriptEntry>>>,
+        EntryStore,
     ) {
         let entries = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let entries_clone = entries.clone();
@@ -279,7 +281,15 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "read the file"})];
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut noop_entry)
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut noop_entry,
+            )
             .await
             .unwrap();
 
@@ -309,7 +319,15 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "read /nonexistent/file.rs"})];
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut noop_entry)
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut noop_entry,
+            )
             .await
             .unwrap();
 
@@ -328,7 +346,15 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "hello"})];
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut noop_entry)
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut noop_entry,
+            )
             .await
             .unwrap();
 
@@ -354,7 +380,15 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "loop forever"})];
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut noop_entry)
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut noop_entry,
+            )
             .await
             .unwrap();
 
@@ -384,7 +418,15 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "use a fake tool"})];
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut noop_entry)
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut noop_entry,
+            )
             .await
             .unwrap();
 
@@ -416,7 +458,15 @@ mod tests {
         let mut deny_all = |_: &str, _: &str| -> bool { false };
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut deny_all, &mut no_refresh, &mut noop_entry)
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut deny_all,
+                &mut no_refresh,
+                &mut noop_entry,
+            )
             .await
             .unwrap();
 
@@ -438,7 +488,15 @@ mod tests {
         let (mut on_entry, collected) = collecting_entries();
 
         agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut on_entry,
+            )
             .await
             .unwrap();
         drop(on_entry);
@@ -481,7 +539,15 @@ mod tests {
         let (mut on_entry, collected) = collecting_entries();
 
         agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut on_entry,
+            )
             .await
             .unwrap();
         drop(on_entry);
@@ -489,9 +555,15 @@ mod tests {
         // Should have: ToolCall, ToolResult, AssistantMessage
         let entries = collected.lock().unwrap();
         assert_eq!(entries.len(), 3);
-        assert!(matches!(&entries[0], TranscriptEntry::ToolCall { name, .. } if name == "file_read"));
-        assert!(matches!(&entries[1], TranscriptEntry::ToolResult { call_id, .. } if call_id == "call_1"));
-        assert!(matches!(&entries[2], TranscriptEntry::AssistantMessage { content, .. } if content == "The file says test content."));
+        assert!(
+            matches!(&entries[0], TranscriptEntry::ToolCall { name, .. } if name == "file_read")
+        );
+        assert!(
+            matches!(&entries[1], TranscriptEntry::ToolResult { call_id, .. } if call_id == "call_1")
+        );
+        assert!(
+            matches!(&entries[2], TranscriptEntry::AssistantMessage { content, .. } if content == "The file says test content.")
+        );
     }
 
     #[tokio::test]
@@ -507,7 +579,15 @@ mod tests {
         let (mut on_entry, collected) = collecting_entries();
 
         agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut on_entry,
+            )
             .await
             .unwrap();
         drop(on_entry);
@@ -527,12 +607,18 @@ mod tests {
                     name: "file_read".into(),
                     arguments: r#"{"path": "/dev/null"}"#.into(),
                 }],
-                usage: Some(crate::api::Usage { input_tokens: 100, output_tokens: 50 }),
+                usage: Some(crate::api::Usage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                }),
             },
             TurnResponse {
                 text: "Done.".into(),
                 tool_calls: vec![],
-                usage: Some(crate::api::Usage { input_tokens: 200, output_tokens: 75 }),
+                usage: Some(crate::api::Usage {
+                    input_tokens: 200,
+                    output_tokens: 75,
+                }),
             },
         ]);
 
@@ -540,12 +626,20 @@ mod tests {
         let input = vec![json!({"role": "user", "content": "read"})];
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut noop_entry)
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut noop_entry,
+            )
             .await
             .unwrap();
 
         let usage = result.usage.unwrap();
-        assert_eq!(usage.input_tokens, 300);  // 100 + 200
+        assert_eq!(usage.input_tokens, 300); // 100 + 200
         assert_eq!(usage.output_tokens, 125); // 50 + 75
     }
 
@@ -562,7 +656,10 @@ mod tests {
                 tool_calls: vec![ToolCall {
                     call_id: "call_1".into(),
                     name: "file_write".into(),
-                    arguments: format!(r#"{{"path": "{}", "content": "hello"}}"#, file_path.display()),
+                    arguments: format!(
+                        r#"{{"path": "{}", "content": "hello"}}"#,
+                        file_path.display()
+                    ),
                 }],
                 usage: None,
             },
@@ -574,7 +671,10 @@ mod tests {
         ]);
 
         let agent = Agent::new(&mock, tmp.path());
-        let input = vec![json!({"role": "system", "content": "old"}), json!({"role": "user", "content": "write"})];
+        let input = vec![
+            json!({"role": "system", "content": "old"}),
+            json!({"role": "user", "content": "write"}),
+        ];
 
         let mut refresh_count = 0;
         let result = agent
@@ -621,7 +721,10 @@ mod tests {
         ]);
 
         let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
-        let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "read"})];
+        let input = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "user", "content": "read"}),
+        ];
 
         let mut refresh_count = 0;
         let result = agent
@@ -664,7 +767,10 @@ mod tests {
         ]);
 
         let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
-        let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "write"})];
+        let input = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "user", "content": "write"}),
+        ];
 
         let mut deny_all = |_: &str, _: &str| -> bool { false };
         let mut refresh_count = 0;
@@ -721,7 +827,10 @@ mod tests {
                 tool_calls: vec![ToolCall {
                     call_id: "call_1".into(),
                     name: "file_write".into(),
-                    arguments: format!(r#"{{"path": "{}", "content": "hello"}}"#, file_path.display()),
+                    arguments: format!(
+                        r#"{{"path": "{}", "content": "hello"}}"#,
+                        file_path.display()
+                    ),
                 }],
                 usage: None,
             },
@@ -733,23 +842,40 @@ mod tests {
         ]);
 
         let agent = Agent::new(&mock, repo.path());
-        let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "write"})];
+        let input = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "user", "content": "write"}),
+        ];
         let (mut on_entry, collected) = collecting_entries();
 
         agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut on_entry,
+            )
             .await
             .unwrap();
         drop(on_entry);
 
         // Should have: ToolCall, ToolResult, Checkpoint, AssistantMessage
         let entries = collected.lock().unwrap();
-        let checkpoint_entries: Vec<_> = entries.iter()
+        let checkpoint_entries: Vec<_> = entries
+            .iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
         assert_eq!(checkpoint_entries.len(), 1);
 
-        if let TranscriptEntry::Checkpoint { snapshots, has_shell_exec, .. } = &checkpoint_entries[0] {
+        if let TranscriptEntry::Checkpoint {
+            snapshots,
+            has_shell_exec,
+            ..
+        } = &checkpoint_entries[0]
+        {
             assert_eq!(snapshots.len(), 1);
             assert_eq!(snapshots[0].pre_hash, checkpoint::CREATED_SENTINEL);
             assert!(!snapshots[0].post_hash.is_empty());
@@ -786,17 +912,29 @@ mod tests {
         ]);
 
         let agent = Agent::new(&mock, repo.path());
-        let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "edit"})];
+        let input = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "user", "content": "edit"}),
+        ];
         let (mut on_entry, collected) = collecting_entries();
 
         agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut on_entry,
+            )
             .await
             .unwrap();
         drop(on_entry);
 
         let entries = collected.lock().unwrap();
-        let checkpoint_entries: Vec<_> = entries.iter()
+        let checkpoint_entries: Vec<_> = entries
+            .iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
         assert_eq!(checkpoint_entries.len(), 1);
@@ -838,13 +976,22 @@ mod tests {
         let (mut on_entry, collected) = collecting_entries();
 
         agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut on_entry,
+            )
             .await
             .unwrap();
         drop(on_entry);
 
         let entries = collected.lock().unwrap();
-        let checkpoint_entries: Vec<_> = entries.iter()
+        let checkpoint_entries: Vec<_> = entries
+            .iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
         assert_eq!(checkpoint_entries.len(), 0);
@@ -878,13 +1025,22 @@ mod tests {
         let (mut on_entry, collected) = collecting_entries();
 
         agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut deny_all, &mut no_refresh, &mut on_entry)
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut deny_all,
+                &mut no_refresh,
+                &mut on_entry,
+            )
             .await
             .unwrap();
         drop(on_entry);
 
         let entries = collected.lock().unwrap();
-        let checkpoint_entries: Vec<_> = entries.iter()
+        let checkpoint_entries: Vec<_> = entries
+            .iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
         assert_eq!(checkpoint_entries.len(), 0);
@@ -904,7 +1060,10 @@ mod tests {
                 tool_calls: vec![ToolCall {
                     call_id: "call_1".into(),
                     name: "file_write".into(),
-                    arguments: format!(r#"{{"path": "{}", "content": "overwrite"}}"#, outside_file.display()),
+                    arguments: format!(
+                        r#"{{"path": "{}", "content": "overwrite"}}"#,
+                        outside_file.display()
+                    ),
                 }],
                 usage: None,
             },
@@ -920,14 +1079,23 @@ mod tests {
         let (mut on_entry, collected) = collecting_entries();
 
         agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut on_entry,
+            )
             .await
             .unwrap();
         drop(on_entry);
 
         // Should have no checkpoint — path is outside project root
         let entries = collected.lock().unwrap();
-        let checkpoint_entries: Vec<_> = entries.iter()
+        let checkpoint_entries: Vec<_> = entries
+            .iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
         assert_eq!(checkpoint_entries.len(), 0);
@@ -970,17 +1138,29 @@ mod tests {
         ]);
 
         let agent = Agent::new(&mock, repo.path());
-        let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "edit"})];
+        let input = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "user", "content": "edit"}),
+        ];
         let (mut on_entry, collected) = collecting_entries();
 
         agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut on_entry,
+            )
             .await
             .unwrap();
         drop(on_entry);
 
         let entries = collected.lock().unwrap();
-        let checkpoint_entries: Vec<_> = entries.iter()
+        let checkpoint_entries: Vec<_> = entries
+            .iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
         // Each file-modifying tool gets its own checkpoint (persisted immediately
@@ -991,14 +1171,16 @@ mod tests {
         // First checkpoint: original → first edit
         if let TranscriptEntry::Checkpoint { snapshots, .. } = &checkpoint_entries[0] {
             assert_eq!(snapshots.len(), 1);
-            let restored = checkpoint::git_cat_file_blob(&snapshots[0].pre_hash, repo.path()).unwrap();
+            let restored =
+                checkpoint::git_cat_file_blob(&snapshots[0].pre_hash, repo.path()).unwrap();
             assert_eq!(String::from_utf8(restored).unwrap(), "original content");
         }
 
         // Second checkpoint: first edit → second edit
         if let TranscriptEntry::Checkpoint { snapshots, .. } = &checkpoint_entries[1] {
             assert_eq!(snapshots.len(), 1);
-            let restored = checkpoint::git_cat_file_blob(&snapshots[0].pre_hash, repo.path()).unwrap();
+            let restored =
+                checkpoint::git_cat_file_blob(&snapshots[0].pre_hash, repo.path()).unwrap();
             assert_eq!(String::from_utf8(restored).unwrap(), "first edit content");
         }
 
@@ -1023,7 +1205,10 @@ mod tests {
                     ToolCall {
                         call_id: "call_1".into(),
                         name: "file_write".into(),
-                        arguments: format!(r#"{{"path": "{}", "content": "hello"}}"#, file_path.display()),
+                        arguments: format!(
+                            r#"{{"path": "{}", "content": "hello"}}"#,
+                            file_path.display()
+                        ),
                     },
                     ToolCall {
                         call_id: "call_2".into(),
@@ -1041,17 +1226,29 @@ mod tests {
         ]);
 
         let agent = Agent::new(&mock, repo.path());
-        let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "do it"})];
+        let input = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "user", "content": "do it"}),
+        ];
         let (mut on_entry, collected) = collecting_entries();
 
         agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut on_entry,
+            )
             .await
             .unwrap();
         drop(on_entry);
 
         let entries = collected.lock().unwrap();
-        let checkpoint_entries: Vec<_> = entries.iter()
+        let checkpoint_entries: Vec<_> = entries
+            .iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
         assert_eq!(checkpoint_entries.len(), 1);
@@ -1062,9 +1259,9 @@ mod tests {
         }
 
         // Rewind derives the warning from ToolCall entries
-        let has_shell_tool = entries.iter().any(|e| {
-            matches!(e, TranscriptEntry::ToolCall { name, .. } if name == "shell_exec")
-        });
+        let has_shell_tool = entries
+            .iter()
+            .any(|e| matches!(e, TranscriptEntry::ToolCall { name, .. } if name == "shell_exec"));
         assert!(has_shell_tool);
     }
 
@@ -1080,7 +1277,10 @@ mod tests {
                 tool_calls: vec![ToolCall {
                     call_id: "call_1".into(),
                     name: "file_write".into(),
-                    arguments: format!(r#"{{"path": "{}", "content": "hello"}}"#, file_path.display()),
+                    arguments: format!(
+                        r#"{{"path": "{}", "content": "hello"}}"#,
+                        file_path.display()
+                    ),
                 }],
                 usage: None,
             },
@@ -1092,20 +1292,36 @@ mod tests {
         ]);
 
         let agent = Agent::new(&mock, repo.path());
-        let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "create"})];
+        let input = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "user", "content": "create"}),
+        ];
         let (mut on_entry, collected) = collecting_entries();
 
         agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut on_entry,
+            )
             .await
             .unwrap();
         drop(on_entry);
 
         let entries = collected.lock().unwrap();
-        let checkpoint_entries: Vec<_> = entries.iter()
+        let checkpoint_entries: Vec<_> = entries
+            .iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
-        assert_eq!(checkpoint_entries.len(), 1, "new file in new dir should be checkpointed");
+        assert_eq!(
+            checkpoint_entries.len(),
+            1,
+            "new file in new dir should be checkpointed"
+        );
 
         if let TranscriptEntry::Checkpoint { snapshots, .. } = &checkpoint_entries[0] {
             assert_eq!(snapshots.len(), 1);
@@ -1139,7 +1355,10 @@ mod tests {
                 tool_calls: vec![ToolCall {
                     call_id: "call_2".into(),
                     name: "file_write".into(),
-                    arguments: format!(r#"{{"path": "{}", "content": "data"}}"#, file_path.display()),
+                    arguments: format!(
+                        r#"{{"path": "{}", "content": "data"}}"#,
+                        file_path.display()
+                    ),
                 }],
                 usage: None,
             },
@@ -1151,17 +1370,29 @@ mod tests {
         ]);
 
         let agent = Agent::new(&mock, repo.path());
-        let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "go"})];
+        let input = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "user", "content": "go"}),
+        ];
         let (mut on_entry, collected) = collecting_entries();
 
         agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut on_entry,
+            )
             .await
             .unwrap();
         drop(on_entry);
 
         let entries = collected.lock().unwrap();
-        let checkpoint_entries: Vec<_> = entries.iter()
+        let checkpoint_entries: Vec<_> = entries
+            .iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
         assert_eq!(checkpoint_entries.len(), 1);
@@ -1190,7 +1421,10 @@ mod tests {
                 tool_calls: vec![ToolCall {
                     call_id: "call_1".into(),
                     name: "file_write".into(),
-                    arguments: format!(r#"{{"path": "{}", "content": "data"}}"#, file_path.display()),
+                    arguments: format!(
+                        r#"{{"path": "{}", "content": "data"}}"#,
+                        file_path.display()
+                    ),
                 }],
                 usage: None,
             },
@@ -1212,11 +1446,22 @@ mod tests {
         ]);
 
         let agent = Agent::new(&mock, repo.path());
-        let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "go"})];
+        let input = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "user", "content": "go"}),
+        ];
         let (mut on_entry, collected) = collecting_entries();
 
         agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut on_entry,
+            )
             .await
             .unwrap();
         drop(on_entry);
@@ -1224,7 +1469,8 @@ mod tests {
         let entries = collected.lock().unwrap();
 
         // Checkpoint was emitted before shell_exec, so has_shell_exec is false
-        let checkpoint_entries: Vec<_> = entries.iter()
+        let checkpoint_entries: Vec<_> = entries
+            .iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
         assert_eq!(checkpoint_entries.len(), 1);
@@ -1236,10 +1482,13 @@ mod tests {
         }
 
         // But rewind should still detect shell_exec by scanning ToolCall entries
-        let has_shell_exec_tool = entries.iter().any(|e| {
-            matches!(e, TranscriptEntry::ToolCall { name, .. } if name == "shell_exec")
-        });
-        assert!(has_shell_exec_tool, "shell_exec ToolCall should be in the entries");
+        let has_shell_exec_tool = entries
+            .iter()
+            .any(|e| matches!(e, TranscriptEntry::ToolCall { name, .. } if name == "shell_exec"));
+        assert!(
+            has_shell_exec_tool,
+            "shell_exec ToolCall should be in the entries"
+        );
     }
 
     #[tokio::test]
@@ -1286,17 +1535,29 @@ mod tests {
         ]);
 
         let agent = Agent::new(&mock, repo.path());
-        let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "edit"})];
+        let input = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "user", "content": "edit"}),
+        ];
         let (mut on_entry, collected) = collecting_entries();
 
         agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut on_entry,
+            )
             .await
             .unwrap();
         drop(on_entry);
 
         let entries = collected.lock().unwrap();
-        let checkpoint_entries: Vec<_> = entries.iter()
+        let checkpoint_entries: Vec<_> = entries
+            .iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
         // Two checkpoints: one per edit (immediate persistence, no batched dedup)
@@ -1305,8 +1566,12 @@ mod tests {
         // First checkpoint: original → first edit
         if let TranscriptEntry::Checkpoint { snapshots, .. } = &checkpoint_entries[0] {
             assert_eq!(snapshots.len(), 1);
-            let restored = checkpoint::git_cat_file_blob(&snapshots[0].pre_hash, repo.path()).unwrap();
-            assert_eq!(String::from_utf8(restored).unwrap(), "original content here");
+            let restored =
+                checkpoint::git_cat_file_blob(&snapshots[0].pre_hash, repo.path()).unwrap();
+            assert_eq!(
+                String::from_utf8(restored).unwrap(),
+                "original content here"
+            );
         }
     }
 
@@ -1340,24 +1605,40 @@ mod tests {
         ]);
 
         let agent = Agent::new(&mock, repo.path());
-        let input = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "edit"})];
+        let input = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "user", "content": "edit"}),
+        ];
         let (mut on_entry, collected) = collecting_entries();
 
         // Agent should return Err because second send_turn fails
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut on_entry)
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut on_entry,
+            )
             .await;
         drop(on_entry);
 
-        assert!(result.is_err(), "agent should fail when send_turn has no more responses");
+        assert!(
+            result.is_err(),
+            "agent should fail when send_turn has no more responses"
+        );
 
         // Despite the error, on_entry should have received entries including a checkpoint
         let entries = collected.lock().unwrap();
-        let checkpoint_entries: Vec<_> = entries.iter()
+        let checkpoint_entries: Vec<_> = entries
+            .iter()
             .filter(|e| matches!(e, TranscriptEntry::Checkpoint { .. }))
             .collect();
         assert_eq!(
-            checkpoint_entries.len(), 1,
+            checkpoint_entries.len(),
+            1,
             "checkpoint should be emitted via on_entry before the API failure"
         );
 
@@ -1368,7 +1649,10 @@ mod tests {
         }
 
         // Verify the file was actually modified (tool executed successfully)
-        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "modified content");
+        assert_eq!(
+            std::fs::read_to_string(&file_path).unwrap(),
+            "modified content"
+        );
 
         // Build a full history as main.rs would: user message + streamed entries
         let mut history: Vec<TranscriptEntry> = Vec::new();
@@ -1376,13 +1660,14 @@ mod tests {
         history.extend(entries.iter().cloned());
 
         // /undo should be able to restore from the checkpoint
-        let undo_result = crate::rewind::undo_last_turn(
-            &history,
-            repo.path(),
-            crate::rewind::RewindMode::Both,
-        ).unwrap();
+        let undo_result =
+            crate::rewind::undo_last_turn(&history, repo.path(), crate::rewind::RewindMode::Both)
+                .unwrap();
 
-        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "original content");
+        assert_eq!(
+            std::fs::read_to_string(&file_path).unwrap(),
+            "original content"
+        );
         assert!(!undo_result.file_results.is_empty());
     }
 
@@ -1433,7 +1718,15 @@ mod tests {
         ];
 
         let result = agent
-            .run(input, &mut noop_token, &mut noop_tool_call, &mut noop_tool_result, &mut allow_all, &mut no_refresh, &mut noop_entry)
+            .run(
+                input,
+                &mut noop_token,
+                &mut noop_tool_call,
+                &mut noop_tool_result,
+                &mut allow_all,
+                &mut no_refresh,
+                &mut noop_entry,
+            )
             .await
             .unwrap();
 

@@ -75,16 +75,14 @@ pub fn undo_last_turn(
     // This is more reliable than the checkpoint's has_shell_exec field, which only
     // reflects knowledge at the time of emission (can't be retroactively patched
     // when entries are streamed incrementally).
-    let had_shell_exec = entries[truncate_to..].iter().any(|e| {
-        matches!(e, TranscriptEntry::ToolCall { name, .. } if name == "shell_exec")
-    });
+    let had_shell_exec = entries[truncate_to..]
+        .iter()
+        .any(|e| matches!(e, TranscriptEntry::ToolCall { name, .. } if name == "shell_exec"));
 
     // Restore files if mode includes code
     if mode != RewindMode::ConversationOnly {
         if mode == RewindMode::CodeOnly && not_in_git {
-            return Err(
-                "not in a git repo — cannot restore code changes".to_string(),
-            );
+            return Err("not in a git repo — cannot restore code changes".to_string());
         }
 
         // Collect ALL checkpoints in the removed range (there can be multiple
@@ -150,8 +148,9 @@ pub fn rewind_to_turn(
         }
     }
 
-    let target_idx = target_idx
-        .ok_or_else(|| format!("turn {turn_number} not found (only {user_msg_count} turns exist)"))?;
+    let target_idx = target_idx.ok_or_else(|| {
+        format!("turn {turn_number} not found (only {user_msg_count} turns exist)")
+    })?;
 
     let truncate_to = target_idx;
 
@@ -159,16 +158,14 @@ pub fn rewind_to_turn(
     let not_in_git = !checkpoint::is_git_repo(project_root);
 
     // Derive shell_exec warning from ToolCall entries in the removed range
-    let had_shell_exec = entries[truncate_to..].iter().any(|e| {
-        matches!(e, TranscriptEntry::ToolCall { name, .. } if name == "shell_exec")
-    });
+    let had_shell_exec = entries[truncate_to..]
+        .iter()
+        .any(|e| matches!(e, TranscriptEntry::ToolCall { name, .. } if name == "shell_exec"));
 
     // Restore files from all checkpoints in the removed range (reverse order)
     if mode != RewindMode::ConversationOnly {
         if mode == RewindMode::CodeOnly && not_in_git {
-            return Err(
-                "not in a git repo — cannot restore code changes".to_string(),
-            );
+            return Err("not in a git repo — cannot restore code changes".to_string());
         }
 
         let checkpoints_in_range: Vec<usize> = (truncate_to..entries.len())
@@ -237,9 +234,7 @@ pub fn format_rewind_result(result: &RewindResult) -> String {
     }
 
     if result.not_in_git {
-        lines.push(
-            "  warning: not in a git repo — code changes cannot be restored".to_string(),
-        );
+        lines.push("  warning: not in a git repo — code changes cannot be restored".to_string());
     }
 
     if result.had_shell_exec {
@@ -293,7 +288,11 @@ mod tests {
         // If shell_exec is flagged, include a shell_exec ToolCall entry
         // (rewind derives the warning from ToolCall entries, not the checkpoint field)
         if has_shell_exec {
-            entries.push(TranscriptEntry::tool_call("c_sh", "shell_exec", r#"{"command":"echo hi"}"#));
+            entries.push(TranscriptEntry::tool_call(
+                "c_sh",
+                "shell_exec",
+                r#"{"command":"echo hi"}"#,
+            ));
             entries.push(TranscriptEntry::tool_result("c_sh", "shell_exec", "hi"));
         }
         entries.push(TranscriptEntry::checkpoint(snapshots, has_shell_exec));
@@ -325,8 +324,8 @@ mod tests {
         entries.extend(simple_turn("q1", "a1"));
         entries.extend(simple_turn("q2", "a2"));
 
-        let result = undo_last_turn(&entries, Path::new("/tmp"), RewindMode::ConversationOnly)
-            .unwrap();
+        let result =
+            undo_last_turn(&entries, Path::new("/tmp"), RewindMode::ConversationOnly).unwrap();
 
         assert_eq!(result.entries.len(), 2); // only q1 + a1
         assert_eq!(result.entries_removed, 2); // q2 + a2
@@ -346,8 +345,8 @@ mod tests {
     #[test]
     fn undo_single_turn() {
         let entries = simple_turn("only question", "only answer");
-        let result = undo_last_turn(&entries, Path::new("/tmp"), RewindMode::ConversationOnly)
-            .unwrap();
+        let result =
+            undo_last_turn(&entries, Path::new("/tmp"), RewindMode::ConversationOnly).unwrap();
         assert!(result.entries.is_empty());
         assert_eq!(result.entries_removed, 2);
     }
@@ -382,7 +381,10 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "original");
         assert_eq!(result.entries.len(), 2); // only q1 + a1
         assert_eq!(result.file_results.len(), 1);
-        assert!(matches!(&result.file_results[0], RestoreResult::Restored { .. }));
+        assert!(matches!(
+            &result.file_results[0],
+            RestoreResult::Restored { .. }
+        ));
     }
 
     #[test]
@@ -520,7 +522,10 @@ mod tests {
         ];
 
         let result = undo_last_turn(&entries, repo.path(), RewindMode::Both).unwrap();
-        assert!(result.had_shell_exec, "should derive shell_exec from ToolCall entries");
+        assert!(
+            result.had_shell_exec,
+            "should derive shell_exec from ToolCall entries"
+        );
     }
 
     // --- rewind_to_turn ---
@@ -598,8 +603,7 @@ mod tests {
         entries.extend(simple_turn("q1", "a1"));
         entries.extend(simple_turn("q2", "a2"));
 
-        let result =
-            rewind_to_turn(&entries, 2, dir.path(), RewindMode::ConversationOnly).unwrap();
+        let result = rewind_to_turn(&entries, 2, dir.path(), RewindMode::ConversationOnly).unwrap();
         assert_eq!(result.entries.len(), 2);
         // not_in_git is true (we're not in a git repo), but operation succeeds
         assert!(result.not_in_git);
@@ -690,8 +694,7 @@ mod tests {
         entries.extend(simple_turn("q1", "a1"));
         entries.extend(simple_turn("q2", "a2"));
 
-        let result =
-            undo_last_turn(&entries, dir.path(), RewindMode::ConversationOnly).unwrap();
+        let result = undo_last_turn(&entries, dir.path(), RewindMode::ConversationOnly).unwrap();
         assert_eq!(result.entries.len(), 2);
         assert_eq!(result.entries_removed, 2);
     }

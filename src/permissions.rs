@@ -164,12 +164,19 @@ impl SessionPermissions {
     #[allow(dead_code)]
     pub fn prompt_user(&mut self, check: &PermissionCheck) -> bool {
         let (message, allow_always) = match check {
-            PermissionCheck::Prompt { message, allow_always } => (message.as_str(), *allow_always),
+            PermissionCheck::Prompt {
+                message,
+                allow_always,
+            } => (message.as_str(), *allow_always),
             PermissionCheck::Allow => return true,
             PermissionCheck::Deny => return false,
         };
 
-        let options = if allow_always { "[y/n/always]" } else { "[y/n]" };
+        let options = if allow_always {
+            "[y/n/always]"
+        } else {
+            "[y/n]"
+        };
         eprint!("  {} {} {} ", "?".yellow(), message, options.dimmed());
         let _ = io::stderr().flush();
 
@@ -197,8 +204,15 @@ impl SessionPermissions {
         match &check {
             PermissionCheck::Allow => true,
             PermissionCheck::Deny => false,
-            PermissionCheck::Prompt { message, allow_always } => {
-                let options = if *allow_always { "[y/n/always]" } else { "[y/n]" };
+            PermissionCheck::Prompt {
+                message,
+                allow_always,
+            } => {
+                let options = if *allow_always {
+                    "[y/n/always]"
+                } else {
+                    "[y/n]"
+                };
                 eprint!("  {} {} {} ", "?".yellow(), message, options.dimmed());
                 let _ = io::stderr().flush();
 
@@ -279,18 +293,18 @@ fn is_destructive_command(cmd: &str) -> bool {
     use regex::Regex;
     // Lazy-init would be better but this is called infrequently
     let patterns = [
-        r"\brm\s+(-\w*[rR]\w*\s+|--recursive)",      // rm -r, rm -rf, rm --recursive
-        r"\bgit\s+push\s+.*--force",                   // git push --force
-        r"\bgit\s+push\s+-f\b",                        // git push -f
-        r"\bgit\s+reset\s+--hard",                     // git reset --hard
-        r"\bgit\s+clean\s+-\w*f",                      // git clean -f, -fd
-        r"(?i)\bdrop\s+(table|database|schema)\b",     // DROP TABLE/DATABASE
-        r"(?i)\btruncate\s+table\b",                   // TRUNCATE TABLE
-        r"(?i)\bdelete\s+from\b",                      // DELETE FROM
-        r"\bchmod\s+(-\w+\s+)*0?777\b",               // chmod 777
-        r"\bmkfs\b",                                   // mkfs
-        r"\bdd\s+.*\bof=/dev/",                        // dd of=/dev/...
-        r">\s*/dev/sd[a-z]",                           // redirect to block device
+        r"\brm\s+(-\w*[rR]\w*\s+|--recursive)", // rm -r, rm -rf, rm --recursive
+        r"\bgit\s+push\s+.*--force",            // git push --force
+        r"\bgit\s+push\s+-f\b",                 // git push -f
+        r"\bgit\s+reset\s+--hard",              // git reset --hard
+        r"\bgit\s+clean\s+-\w*f",               // git clean -f, -fd
+        r"(?i)\bdrop\s+(table|database|schema)\b", // DROP TABLE/DATABASE
+        r"(?i)\btruncate\s+table\b",            // TRUNCATE TABLE
+        r"(?i)\bdelete\s+from\b",               // DELETE FROM
+        r"\bchmod\s+(-\w+\s+)*0?777\b",         // chmod 777
+        r"\bmkfs\b",                            // mkfs
+        r"\bdd\s+.*\bof=/dev/",                 // dd of=/dev/...
+        r">\s*/dev/sd[a-z]",                    // redirect to block device
     ];
 
     for pattern in &patterns {
@@ -325,19 +339,43 @@ mod tests {
     #[test]
     fn yolo_allows_everything() {
         let p = perms(PermissionMode::Yolo);
-        assert_eq!(p.check("file_read", r#"{"path":"x"}"#), PermissionCheck::Allow);
-        assert_eq!(p.check("file_write", r#"{"path":"x"}"#), PermissionCheck::Allow);
-        assert_eq!(p.check("shell_exec", r#"{"command":"rm -rf /"}"#), PermissionCheck::Allow);
+        assert_eq!(
+            p.check("file_read", r#"{"path":"x"}"#),
+            PermissionCheck::Allow
+        );
+        assert_eq!(
+            p.check("file_write", r#"{"path":"x"}"#),
+            PermissionCheck::Allow
+        );
+        assert_eq!(
+            p.check("shell_exec", r#"{"command":"rm -rf /"}"#),
+            PermissionCheck::Allow
+        );
     }
 
     #[test]
     fn readonly_allows_reads_denies_writes() {
         let p = perms(PermissionMode::ReadOnly);
-        assert_eq!(p.check("file_read", r#"{"path":"x"}"#), PermissionCheck::Allow);
-        assert_eq!(p.check("list_files", r#"{"path":"."}"#), PermissionCheck::Allow);
-        assert_eq!(p.check("grep", r#"{"pattern":"foo"}"#), PermissionCheck::Allow);
-        assert_eq!(p.check("file_write", r#"{"path":"x"}"#), PermissionCheck::Deny);
-        assert_eq!(p.check("shell_exec", r#"{"command":"ls"}"#), PermissionCheck::Deny);
+        assert_eq!(
+            p.check("file_read", r#"{"path":"x"}"#),
+            PermissionCheck::Allow
+        );
+        assert_eq!(
+            p.check("list_files", r#"{"path":"."}"#),
+            PermissionCheck::Allow
+        );
+        assert_eq!(
+            p.check("grep", r#"{"pattern":"foo"}"#),
+            PermissionCheck::Allow
+        );
+        assert_eq!(
+            p.check("file_write", r#"{"path":"x"}"#),
+            PermissionCheck::Deny
+        );
+        assert_eq!(
+            p.check("shell_exec", r#"{"command":"ls"}"#),
+            PermissionCheck::Deny
+        );
     }
 
     #[test]
@@ -367,48 +405,87 @@ mod tests {
         let args = format!(r#"{{"path":"{}"}}"#, file_path.display());
         let p = perms_with_root(PermissionMode::Default, dir.path().to_path_buf());
         let check = p.check("file_write", &args);
-        assert!(matches!(check, PermissionCheck::Prompt { allow_always: true, .. }));
+        assert!(matches!(
+            check,
+            PermissionCheck::Prompt {
+                allow_always: true,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn default_prompts_for_shell() {
         let p = perms(PermissionMode::Default);
         let check = p.check("shell_exec", r#"{"command":"ls -la"}"#);
-        assert!(matches!(check, PermissionCheck::Prompt { allow_always: true, .. }));
+        assert!(matches!(
+            check,
+            PermissionCheck::Prompt {
+                allow_always: true,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn destructive_command_no_always() {
         let p = perms(PermissionMode::Default);
         let check = p.check("shell_exec", r#"{"command":"rm -rf /tmp/stuff"}"#);
-        assert!(matches!(check, PermissionCheck::Prompt { allow_always: false, .. }));
+        assert!(matches!(
+            check,
+            PermissionCheck::Prompt {
+                allow_always: false,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn trust_prompts_for_destructive() {
         let p = perms(PermissionMode::Trust);
         let check = p.check("shell_exec", r#"{"command":"git push --force"}"#);
-        assert!(matches!(check, PermissionCheck::Prompt { allow_always: false, .. }));
+        assert!(matches!(
+            check,
+            PermissionCheck::Prompt {
+                allow_always: false,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn trust_prompts_for_normal_shell() {
         let p = perms(PermissionMode::Trust);
         let check = p.check("shell_exec", r#"{"command":"cargo build"}"#);
-        assert!(matches!(check, PermissionCheck::Prompt { allow_always: true, .. }));
+        assert!(matches!(
+            check,
+            PermissionCheck::Prompt {
+                allow_always: true,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn readonly_denies_shell() {
         let p = perms(PermissionMode::ReadOnly);
-        assert_eq!(p.check("shell_exec", r#"{"command":"ls"}"#), PermissionCheck::Deny);
-        assert_eq!(p.check("shell_exec", r#"{"command":"rm -rf /"}"#), PermissionCheck::Deny);
+        assert_eq!(
+            p.check("shell_exec", r#"{"command":"ls"}"#),
+            PermissionCheck::Deny
+        );
+        assert_eq!(
+            p.check("shell_exec", r#"{"command":"rm -rf /"}"#),
+            PermissionCheck::Deny
+        );
     }
 
     #[test]
     fn yolo_allows_destructive_shell() {
         let p = perms(PermissionMode::Yolo);
-        assert_eq!(p.check("shell_exec", r#"{"command":"rm -rf /"}"#), PermissionCheck::Allow);
+        assert_eq!(
+            p.check("shell_exec", r#"{"command":"rm -rf /"}"#),
+            PermissionCheck::Allow
+        );
     }
 
     #[test]
@@ -418,7 +495,10 @@ mod tests {
 
         // Shell without cwd uses project root as target dir
         let args = r#"{"command":"ls"}"#;
-        assert!(matches!(p.check("shell_exec", args), PermissionCheck::Prompt { .. }));
+        assert!(matches!(
+            p.check("shell_exec", args),
+            PermissionCheck::Prompt { .. }
+        ));
 
         // Grant "always" for project root
         p.grant_always(dir.path().to_path_buf());
@@ -426,7 +506,13 @@ mod tests {
 
         // Destructive still prompts even with always grant
         let destructive = r#"{"command":"rm -rf /tmp"}"#;
-        assert!(matches!(p.check("shell_exec", destructive), PermissionCheck::Prompt { allow_always: false, .. }));
+        assert!(matches!(
+            p.check("shell_exec", destructive),
+            PermissionCheck::Prompt {
+                allow_always: false,
+                ..
+            }
+        ));
     }
 
     // --- "Always" grants ---
@@ -439,7 +525,10 @@ mod tests {
         let args = format!(r#"{{"path":"{}"}}"#, file_path.display());
 
         // Before grant: prompts
-        assert!(matches!(p.check("file_write", &args), PermissionCheck::Prompt { .. }));
+        assert!(matches!(
+            p.check("file_write", &args),
+            PermissionCheck::Prompt { .. }
+        ));
 
         // Grant "always" for the directory
         p.grant_always(dir.path().to_path_buf());
@@ -465,7 +554,10 @@ mod tests {
 
         // File in subdir: still prompts (different dir)
         let args_sub = format!(r#"{{"path":"{}"}}"#, sub.join("file.txt").display());
-        assert!(matches!(p.check("file_write", &args_sub), PermissionCheck::Prompt { .. }));
+        assert!(matches!(
+            p.check("file_write", &args_sub),
+            PermissionCheck::Prompt { .. }
+        ));
     }
 
     // --- relative path classification ---
@@ -479,7 +571,10 @@ mod tests {
 
         let p = perms_with_root(PermissionMode::Trust, dir.path().to_path_buf());
         let args = r#"{"path":"src/lib.rs","content":"hello"}"#;
-        assert_eq!(p.classify_tool("file_write", args), ToolCategory::WriteInProject);
+        assert_eq!(
+            p.classify_tool("file_write", args),
+            ToolCategory::WriteInProject
+        );
         // Trust mode should auto-approve this
         assert_eq!(p.check("file_write", args), PermissionCheck::Allow);
     }
@@ -492,7 +587,10 @@ mod tests {
 
         let p = perms_with_root(PermissionMode::Trust, dir.path().to_path_buf());
         let args = r#"{"path":"src/lib.rs","old_string":"old","new_string":"new"}"#;
-        assert_eq!(p.classify_tool("file_edit", args), ToolCategory::WriteInProject);
+        assert_eq!(
+            p.classify_tool("file_edit", args),
+            ToolCategory::WriteInProject
+        );
         assert_eq!(p.check("file_edit", args), PermissionCheck::Allow);
     }
 
@@ -502,9 +600,15 @@ mod tests {
     fn file_edit_classified_same_as_file_write_in_project() {
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("test.txt");
-        let args = format!(r#"{{"path":"{}","old_string":"a","new_string":"b"}}"#, file_path.display());
+        let args = format!(
+            r#"{{"path":"{}","old_string":"a","new_string":"b"}}"#,
+            file_path.display()
+        );
         let p = perms_with_root(PermissionMode::Trust, dir.path().to_path_buf());
-        assert_eq!(p.classify_tool("file_edit", &args), ToolCategory::WriteInProject);
+        assert_eq!(
+            p.classify_tool("file_edit", &args),
+            ToolCategory::WriteInProject
+        );
         assert_eq!(p.check("file_edit", &args), PermissionCheck::Allow);
     }
 
@@ -513,22 +617,43 @@ mod tests {
         let dir = tempdir().unwrap();
         let other = tempdir().unwrap();
         let file_path = other.path().join("escape.txt");
-        let args = format!(r#"{{"path":"{}","old_string":"a","new_string":"b"}}"#, file_path.display());
+        let args = format!(
+            r#"{{"path":"{}","old_string":"a","new_string":"b"}}"#,
+            file_path.display()
+        );
         let p = perms_with_root(PermissionMode::Trust, dir.path().to_path_buf());
-        assert_eq!(p.classify_tool("file_edit", &args), ToolCategory::WriteOutsideProject);
-        assert!(matches!(p.check("file_edit", &args), PermissionCheck::Prompt { .. }));
+        assert_eq!(
+            p.classify_tool("file_edit", &args),
+            ToolCategory::WriteOutsideProject
+        );
+        assert!(matches!(
+            p.check("file_edit", &args),
+            PermissionCheck::Prompt { .. }
+        ));
     }
 
     #[test]
     fn file_edit_readonly_denied() {
         let p = perms(PermissionMode::ReadOnly);
-        assert_eq!(p.check("file_edit", r#"{"path":"x","old_string":"a","new_string":"b"}"#), PermissionCheck::Deny);
+        assert_eq!(
+            p.check(
+                "file_edit",
+                r#"{"path":"x","old_string":"a","new_string":"b"}"#
+            ),
+            PermissionCheck::Deny
+        );
     }
 
     #[test]
     fn file_edit_yolo_allowed() {
         let p = perms(PermissionMode::Yolo);
-        assert_eq!(p.check("file_edit", r#"{"path":"x","old_string":"a","new_string":"b"}"#), PermissionCheck::Allow);
+        assert_eq!(
+            p.check(
+                "file_edit",
+                r#"{"path":"x","old_string":"a","new_string":"b"}"#
+            ),
+            PermissionCheck::Allow
+        );
     }
 
     // --- Destructive pattern detection ---

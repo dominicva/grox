@@ -90,8 +90,7 @@ impl ContextAssembler {
                         "content": format!("[Context summary from earlier in this conversation]\n\n{summary}"),
                     }));
                 }
-                TranscriptEntry::SystemEvent { .. }
-                | TranscriptEntry::Checkpoint { .. } => {
+                TranscriptEntry::SystemEvent { .. } | TranscriptEntry::Checkpoint { .. } => {
                     // Internal bookkeeping — not sent to the model
                 }
             }
@@ -198,7 +197,9 @@ mod tests {
     #[test]
     fn compaction_summary_wire_format() {
         let assembler = ContextAssembler::new(test_system_prompt());
-        let entries = vec![TranscriptEntry::compaction_summary("User asked about auth. Files read: src/auth.rs")];
+        let entries = vec![TranscriptEntry::compaction_summary(
+            "User asked about auth. Files read: src/auth.rs",
+        )];
         let messages = assembler.build_messages(&entries);
 
         assert_eq!(messages[1]["role"], "system");
@@ -272,8 +273,8 @@ mod tests {
     fn estimate_tokens_sums_entries_plus_overhead() {
         let assembler = ContextAssembler::new(test_system_prompt());
         let entries = vec![
-            TranscriptEntry::user_message("hello world"),       // 11/4 = 2
-            TranscriptEntry::assistant_message("hi there!"),     // 9/4 = 2
+            TranscriptEntry::user_message("hello world"), // 11/4 = 2
+            TranscriptEntry::assistant_message("hi there!"), // 9/4 = 2
         ];
         let estimate = assembler.estimate_tokens(&entries);
 

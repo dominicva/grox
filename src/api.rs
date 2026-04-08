@@ -92,8 +92,7 @@ impl GrokApi for GrokClient {
             parallel_tool_calls: if tools.is_empty() { None } else { Some(false) },
         };
 
-        let body_json = serde_json::to_value(&body)
-            .context("Failed to serialize request body")?;
+        let body_json = serde_json::to_value(&body).context("Failed to serialize request body")?;
 
         for attempt in 0..=RETRY_DELAYS.len() {
             let request = self
@@ -103,7 +102,9 @@ impl GrokApi for GrokClient {
                 .json(&body_json);
 
             // Check HTTP status before streaming by sending the request manually
-            let response = request.send().await
+            let response = request
+                .send()
+                .await
                 .context("Failed to connect to Grok API")?;
 
             let status = response.status();
@@ -117,7 +118,10 @@ impl GrokApi for GrokClient {
                             tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
                             continue;
                         }
-                        bail!("Rate limited (429). Retried {} times without success.", RETRY_DELAYS.len());
+                        bail!(
+                            "Rate limited (429). Retried {} times without success.",
+                            RETRY_DELAYS.len()
+                        );
                     }
                     400 => bail!("Bad request (400): {body_text}"),
                     code => bail!("API error (HTTP {code}): {body_text}"),
@@ -150,15 +154,14 @@ impl GrokApi for GrokClient {
                 let event_type = if !event.event.is_empty() && event.event != "message" {
                     event.event.as_str()
                 } else {
-                    parsed.get("type")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("")
+                    parsed.get("type").and_then(|t| t.as_str()).unwrap_or("")
                 };
 
                 match event_type {
                     // Server-side error
                     "error" => {
-                        let message = parsed.get("message")
+                        let message = parsed
+                            .get("message")
                             .and_then(|m| m.as_str())
                             .unwrap_or("Unknown API error");
                         bail!("{message}");
@@ -174,20 +177,21 @@ impl GrokApi for GrokClient {
                     // A complete output item (message or function_call)
                     "response.output_item.done" => {
                         if let Some(item) = parsed.get("item") {
-                            let item_type = item.get("type")
-                                .and_then(|t| t.as_str())
-                                .unwrap_or("");
+                            let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
                             if item_type == "function_call" {
-                                let call_id = item.get("call_id")
+                                let call_id = item
+                                    .get("call_id")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("")
                                     .to_string();
-                                let name = item.get("name")
+                                let name = item
+                                    .get("name")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("")
                                     .to_string();
-                                let arguments = item.get("arguments")
+                                let arguments = item
+                                    .get("arguments")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("{}")
                                     .to_string();
@@ -203,13 +207,14 @@ impl GrokApi for GrokClient {
                     // Response completed — extract usage
                     "response.completed" => {
                         if let Some(u) = parsed.get("response").and_then(|r| r.get("usage")) {
-                            let input_tokens = u.get("input_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
-                            let output_tokens = u.get("output_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
-                            usage = Some(Usage { input_tokens, output_tokens });
+                            let input_tokens =
+                                u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let output_tokens =
+                                u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            usage = Some(Usage {
+                                input_tokens,
+                                output_tokens,
+                            });
                         }
                     }
                     _ => {}

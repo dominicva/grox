@@ -114,10 +114,7 @@ pub fn snapshot_post(file_path: &Path, repo_root: &Path) -> Result<String> {
 /// Restore a single file from a checkpoint snapshot.
 ///
 /// Returns a `RestoreResult` indicating what happened.
-pub fn restore_file(
-    snapshot: &FileSnapshot,
-    repo_root: &Path,
-) -> RestoreResult {
+pub fn restore_file(snapshot: &FileSnapshot, repo_root: &Path) -> RestoreResult {
     let file_path = PathBuf::from(&snapshot.path);
 
     // Check if file was modified since the agent's turn
@@ -171,13 +168,13 @@ pub fn restore_file(
         match git_cat_file_blob(&snapshot.pre_hash, repo_root) {
             Ok(content) => {
                 // Ensure parent directory exists
-                if let Some(parent) = file_path.parent() {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
-                        return RestoreResult::Failed {
-                            path: snapshot.path.clone(),
-                            reason: format!("failed to create parent dir: {e}"),
-                        };
-                    }
+                if let Some(parent) = file_path.parent()
+                    && let Err(e) = std::fs::create_dir_all(parent)
+                {
+                    return RestoreResult::Failed {
+                        path: snapshot.path.clone(),
+                        reason: format!("failed to create parent dir: {e}"),
+                    };
                 }
                 match std::fs::write(&file_path, content) {
                     Ok(()) => RestoreResult::Restored {

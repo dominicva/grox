@@ -35,30 +35,35 @@ pub fn detect_project_root(start: &Path) -> PathBuf {
 /// Used for write operations to prevent escaping the project root.
 pub fn validate_path(target: &Path, root: &Path) -> Result<PathBuf> {
     // Resolve the root to its canonical form
-    let canonical_root = root.canonicalize()
-        .map_err(|e| anyhow::anyhow!("Failed to resolve project root '{}': {}", root.display(), e))?;
+    let canonical_root = root.canonicalize().map_err(|e| {
+        anyhow::anyhow!("Failed to resolve project root '{}': {}", root.display(), e)
+    })?;
 
     // If the target doesn't exist yet, resolve as much of the path as possible
     // by canonicalizing the parent directory
     let resolved = if target.exists() {
-        target.canonicalize()
+        target
+            .canonicalize()
             .map_err(|e| anyhow::anyhow!("Failed to resolve path '{}': {}", target.display(), e))?
     } else {
         // Resolve the parent, then append the filename
-        let parent = target.parent()
+        let parent = target
+            .parent()
             .ok_or_else(|| anyhow::anyhow!("Invalid path: {}", target.display()))?;
 
         let canonical_parent = if parent.as_os_str().is_empty() {
             // Relative path with no parent component — use current dir
             std::env::current_dir()?
         } else if parent.exists() {
-            parent.canonicalize()
-                .map_err(|e| anyhow::anyhow!("Failed to resolve parent '{}': {}", parent.display(), e))?
+            parent.canonicalize().map_err(|e| {
+                anyhow::anyhow!("Failed to resolve parent '{}': {}", parent.display(), e)
+            })?
         } else {
             bail!("Parent directory does not exist: {}", parent.display());
         };
 
-        let filename = target.file_name()
+        let filename = target
+            .file_name()
             .ok_or_else(|| anyhow::anyhow!("Invalid path: {}", target.display()))?;
 
         canonical_parent.join(filename)
@@ -108,7 +113,9 @@ pub fn load_grox_md(project_root: &Path) -> Option<String> {
     } else {
         let truncated = &content[..GROX_MD_MAX_CHARS];
         let remaining = content.len() - GROX_MD_MAX_CHARS;
-        Some(format!("{truncated}\n\n... (GROX.md truncated — {remaining} characters omitted)"))
+        Some(format!(
+            "{truncated}\n\n... (GROX.md truncated — {remaining} characters omitted)"
+        ))
     }
 }
 
@@ -174,7 +181,12 @@ mod tests {
 
         let result = validate_path(&file, dir.path());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("outside the project root"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("outside the project root")
+        );
     }
 
     #[test]
@@ -201,7 +213,12 @@ mod tests {
 
         let result = validate_path(&link, dir.path());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("outside the project root"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("outside the project root")
+        );
     }
 
     #[test]
