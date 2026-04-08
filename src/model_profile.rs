@@ -163,6 +163,7 @@ impl ModelProfile {
     /// included in `output_tokens` by the API — no separate calculation needed.
     /// When `cached_input_tokens` are available, those tokens are billed at
     /// `cached_input_price` instead of `input_price`.
+    #[cfg(test)]
     pub fn estimate_cost(&self, input_tokens: u64, output_tokens: u64) -> Option<f64> {
         if self.input_price == 0.0 && self.output_price == 0.0 {
             return None;

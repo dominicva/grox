@@ -248,11 +248,20 @@ async fn main() -> Result<()> {
         format!("{permission_mode}").cyan(),
         "/quit".dimmed()
     );
-    println!(
-        "{}",
-        "note: grox can read any file on your system. File contents are sent to xAI and stored for 30 days (use --no-store to opt out)."
-            .dimmed()
-    );
+    let no_store = cli.no_store || std::env::var("GROX_NO_STORE").as_deref() == Ok("1");
+    if no_store {
+        println!(
+            "{}",
+            "note: grox can read any file on your system. File contents are sent to xAI (store: false — provider asked not to retain)."
+                .dimmed()
+        );
+    } else {
+        println!(
+            "{}",
+            "note: grox can read any file on your system. File contents are sent to xAI and stored for 30 days (use --no-store to opt out)."
+                .dimmed()
+        );
+    }
     if resumed {
         println!(
             "{}",
@@ -289,8 +298,7 @@ async fn main() -> Result<()> {
 
     let mut client = GrokClient::new(api_key, model, session_meta.session_id.clone());
 
-    // Enable no-store mode if --no-store flag or GROX_NO_STORE=1 env var is set
-    if cli.no_store || std::env::var("GROX_NO_STORE").as_deref() == Ok("1") {
+    if no_store {
         client.set_no_store(true);
     }
 
@@ -631,7 +639,8 @@ async fn main() -> Result<()> {
                                 &sessions_dir,
                                 &session_meta.session_id,
                             ));
-                            // Restore saved model unless user explicitly set one
+                            // Update client to match resumed session
+                            client.set_session_id(session_meta.session_id.clone());
                             if session_meta.model != client.model() {
                                 client.set_model(session_meta.model.clone());
                                 println!(
@@ -714,7 +723,7 @@ async fn main() -> Result<()> {
                 let new_count = result.entries.len();
                 let llm_cost = result.llm_usage.as_ref().and_then(|u| {
                     let profile = model_profile::ModelProfile::for_model(client.model());
-                    profile.estimate_cost(u.input_tokens, u.output_tokens)
+                    profile.estimate_cost_from_usage(u)
                 });
                 history = result.entries;
                 transcript.atomic_rewrite(&history)?;
@@ -729,7 +738,7 @@ async fn main() -> Result<()> {
             } else {
                 let llm_cost = result.llm_usage.as_ref().and_then(|u| {
                     let profile = model_profile::ModelProfile::for_model(client.model());
-                    profile.estimate_cost(u.input_tokens, u.output_tokens)
+                    profile.estimate_cost_from_usage(u)
                 });
                 if let Some(cost) = llm_cost {
                     println!(
@@ -773,7 +782,7 @@ async fn main() -> Result<()> {
                     model_profile::ModelProfile::for_model(client.model()).compaction_threshold();
                 let llm_cost = result.llm_usage.as_ref().and_then(|u| {
                     let profile = model_profile::ModelProfile::for_model(client.model());
-                    profile.estimate_cost(u.input_tokens, u.output_tokens)
+                    profile.estimate_cost_from_usage(u)
                 });
                 history = result.entries;
                 transcript.atomic_rewrite(&history)?;

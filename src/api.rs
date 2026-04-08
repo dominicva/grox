@@ -102,6 +102,10 @@ impl GrokClient {
         }
     }
 
+    pub fn set_session_id(&mut self, session_id: String) {
+        self.session_id = session_id;
+    }
+
     pub fn set_no_store(&mut self, no_store: bool) {
         self.no_store = no_store;
     }
