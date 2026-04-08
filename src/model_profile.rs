@@ -158,6 +158,11 @@ impl ModelProfile {
     }
 
     /// Estimate cost for a given usage.
+    ///
+    /// Reasoning tokens are billed at the output token rate and are already
+    /// included in `output_tokens` by the API — no separate calculation needed.
+    /// When `cached_input_tokens` are available, those tokens are billed at
+    /// `cached_input_price` instead of `input_price`.
     pub fn estimate_cost(&self, input_tokens: u64, output_tokens: u64) -> Option<f64> {
         if self.input_price == 0.0 && self.output_price == 0.0 {
             return None;
@@ -166,6 +171,19 @@ impl ModelProfile {
             (input_tokens as f64 * self.input_price + output_tokens as f64 * self.output_price)
                 / 1_000_000.0,
         )
+    }
+
+    /// Estimate cost using full Usage details (cached tokens, reasoning tokens).
+    pub fn estimate_cost_from_usage(&self, usage: &crate::api::Usage) -> Option<f64> {
+        if self.input_price == 0.0 && self.output_price == 0.0 {
+            return None;
+        }
+        let cached = usage.cached_input_tokens.unwrap_or(0);
+        let non_cached = usage.input_tokens.saturating_sub(cached);
+        let input_cost =
+            non_cached as f64 * self.input_price + cached as f64 * self.cached_input_price;
+        let output_cost = usage.output_tokens as f64 * self.output_price;
+        Some((input_cost + output_cost) / 1_000_000.0)
     }
 }
 

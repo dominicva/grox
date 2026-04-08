@@ -192,6 +192,8 @@ impl GrokApi for GrokClient {
             let mut text = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut usage: Option<Usage> = None;
+            let mut reasoning_content: Option<String> = None;
+            let mut encrypted_reasoning: Option<String> = None;
 
             while let Some(event) = stream.try_next().await? {
                 if event.data == "[DONE]" {
@@ -229,7 +231,7 @@ impl GrokApi for GrokClient {
                             text.push_str(&delta);
                         }
                     }
-                    // A complete output item (message or function_call)
+                    // A complete output item (message, function_call, or reasoning)
                     "response.output_item.done" => {
                         if let Some(item) = parsed.get("item") {
                             let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -256,6 +258,22 @@ impl GrokApi for GrokClient {
                                     name,
                                     arguments,
                                 });
+                            } else if item_type == "reasoning" {
+                                // Reasoning output: extract plaintext or encrypted content
+                                if let Some(content_arr) = item.get("content").and_then(|c| c.as_array()) {
+                                    for block in content_arr {
+                                        let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                        if block_type == "reasoning_text" {
+                                            if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                                                reasoning_content = Some(t.to_string());
+                                            }
+                                        } else if block_type == "reasoning_encrypted" {
+                                            if let Some(data) = block.get("data").and_then(|v| v.as_str()) {
+                                                encrypted_reasoning = Some(data.to_string());
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -290,8 +308,8 @@ impl GrokApi for GrokClient {
                 text,
                 tool_calls,
                 usage,
-                reasoning_content: None,
-                encrypted_reasoning: None,
+                reasoning_content,
+                encrypted_reasoning,
             });
         }
 
