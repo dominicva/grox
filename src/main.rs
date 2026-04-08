@@ -832,7 +832,24 @@ async fn main() -> Result<()> {
                 let _ = session_meta.save(&sessions_dir);
             }
             Err(e) => {
-                eprintln!("\n{} {e}\n", "error:".red().bold());
+                // Check if the provider rejected the model (404, model-not-found)
+                if e.downcast_ref::<api::ModelRejected>().is_some() {
+                    let fallback = "grok-3-fast";
+                    eprintln!(
+                        "\n{}",
+                        format!(
+                            "  model '{}' rejected by provider — falling back to {fallback}",
+                            client.model()
+                        )
+                        .yellow()
+                    );
+                    client.set_model(fallback.to_string());
+                    session_meta.model = fallback.to_string();
+                    let _ = session_meta.save(&sessions_dir);
+                    eprintln!("{}", "  please re-send your message.\n".yellow());
+                } else {
+                    eprintln!("\n{} {e}\n", "error:".red().bold());
+                }
             }
         }
     }

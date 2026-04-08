@@ -7,6 +7,26 @@ use crate::tools::ToolCall;
 
 // --- Public types ---
 
+/// The provider rejected the requested model (404, model-not-found, model-not-supported).
+/// Callers can downcast to this to trigger model fallback.
+#[derive(Debug)]
+pub struct ModelRejected {
+    pub model: String,
+    pub detail: String,
+}
+
+impl std::fmt::Display for ModelRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Model '{}' rejected by provider: {}",
+            self.model, self.detail
+        )
+    }
+}
+
+impl std::error::Error for ModelRejected {}
+
 #[derive(Debug, Clone)]
 pub struct TurnResponse {
     pub text: String,
@@ -76,6 +96,15 @@ struct ResponsesRequest {
 
 const RETRY_DELAYS: &[u64] = &[1, 3];
 
+/// Check if an API error body indicates the model itself was rejected.
+fn is_model_rejection(body: &str) -> bool {
+    let lower = body.to_lowercase();
+    lower.contains("model not found")
+        || lower.contains("model_not_found")
+        || lower.contains("model not supported")
+        || lower.contains("model_not_supported")
+}
+
 #[async_trait]
 impl GrokApi for GrokClient {
     async fn send_turn(
@@ -122,6 +151,20 @@ impl GrokApi for GrokClient {
                             "Rate limited (429). Retried {} times without success.",
                             RETRY_DELAYS.len()
                         );
+                    }
+                    404 => {
+                        return Err(ModelRejected {
+                            model: self.model.clone(),
+                            detail: body_text,
+                        }
+                        .into());
+                    }
+                    400 if is_model_rejection(&body_text) => {
+                        return Err(ModelRejected {
+                            model: self.model.clone(),
+                            detail: body_text,
+                        }
+                        .into());
                     }
                     400 => bail!("Bad request (400): {body_text}"),
                     code => bail!("API error (HTTP {code}): {body_text}"),
