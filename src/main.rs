@@ -368,6 +368,7 @@ async fn main() -> Result<()> {
         .build();
     let mut rl = Editor::with_config(config)?;
     rl.set_helper(Some(GroxHelper));
+    let mut term_renderer = renderer::TerminalRenderer::new();
 
     loop {
         let input = match rl.readline(&format!("{} ", ">>".green().bold())) {
@@ -835,7 +836,7 @@ async fn main() -> Result<()> {
 
         println!();
 
-        let mut term_renderer = renderer::TerminalRenderer::new();
+        term_renderer.begin_turn();
         let agent = Agent::new(&client, &project_root);
         match agent
             .run(

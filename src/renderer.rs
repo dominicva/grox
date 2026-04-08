@@ -21,6 +21,11 @@ pub trait Renderer: Send {
     /// Called after a tool finishes executing, with its output.
     fn on_tool_result(&mut self, name: &str, output: &str);
 
+    /// Called when authorization produces a warning (e.g. destructive command).
+    /// Phase 5 will populate these; until then the warning is always `None`
+    /// and this method is a no-op pass-through.
+    fn on_auth_warning(&mut self, _warning: &str) {}
+
     /// Called when the model emits reasoning content.
     ///
     /// `plaintext` is set for models that return readable reasoning (grok-3-mini).
@@ -48,6 +53,13 @@ impl TerminalRenderer {
             ss: SyntaxSet::load_defaults_newlines(),
             ts: ThemeSet::load_defaults(),
         }
+    }
+
+    /// Reset per-turn state. Called before each agent turn so ephemeral flags
+    /// like first_token reset while session-level state (thinking toggle, etc.)
+    /// persists across turns.
+    pub fn begin_turn(&mut self) {
+        self.first_token = true;
     }
 }
 
@@ -183,6 +195,7 @@ pub struct RecordingRenderer {
     pub tool_calls: Vec<(String, String)>,
     pub tool_results: Vec<(String, String)>,
     pub reasoning_calls: Vec<(Option<String>, Option<String>, Option<u64>)>,
+    pub auth_warnings: Vec<String>,
 }
 
 #[cfg(test)]
@@ -193,6 +206,7 @@ impl RecordingRenderer {
             tool_calls: Vec::new(),
             tool_results: Vec::new(),
             reasoning_calls: Vec::new(),
+            auth_warnings: Vec::new(),
         }
     }
 }
@@ -207,6 +221,9 @@ impl Renderer for RecordingRenderer {
     }
     fn on_tool_result(&mut self, name: &str, output: &str) {
         self.tool_results.push((name.to_string(), output.to_string()));
+    }
+    fn on_auth_warning(&mut self, warning: &str) {
+        self.auth_warnings.push(warning.to_string());
     }
     fn on_reasoning(
         &mut self,
@@ -257,7 +274,6 @@ pub fn summarize_tool_call(name: &str, args: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::permissions::AuthorizationResult;
 
     // --- Renderer trait compliance ---
 
@@ -301,48 +317,36 @@ mod tests {
     }
 
     #[test]
+    fn recording_renderer_captures_auth_warnings() {
+        let mut r = RecordingRenderer::new();
+        r.on_auth_warning("destructive command detected");
+        assert_eq!(r.auth_warnings, vec!["destructive command detected"]);
+    }
+
+    #[test]
     fn recording_renderer_starts_empty() {
         let r = RecordingRenderer::new();
         assert!(r.tokens.is_empty());
         assert!(r.tool_calls.is_empty());
         assert!(r.tool_results.is_empty());
         assert!(r.reasoning_calls.is_empty());
-    }
-
-    // --- AuthorizationResult wiring ---
-
-    #[test]
-    fn authorization_result_with_no_warning() {
-        let result = AuthorizationResult {
-            allowed: true,
-            warning: None,
-        };
-        assert!(result.allowed);
-        assert!(result.warning.is_none());
+        assert!(r.auth_warnings.is_empty());
     }
 
     #[test]
-    fn authorization_result_denied_with_no_warning() {
-        let result = AuthorizationResult {
-            allowed: false,
-            warning: None,
-        };
-        assert!(!result.allowed);
-        assert!(result.warning.is_none());
-    }
-
-    #[test]
-    fn authorization_result_with_warning_placeholder() {
-        // Phase 5 will populate warnings — verify the field works
-        let result = AuthorizationResult {
-            allowed: true,
-            warning: Some("destructive command detected".into()),
-        };
-        assert!(result.allowed);
-        assert_eq!(
-            result.warning.as_deref(),
-            Some("destructive command detected")
-        );
+    fn default_on_auth_warning_is_noop() {
+        // Verify the default trait method compiles and doesn't panic.
+        // TerminalRenderer inherits the default no-op; Phase 5 will override it.
+        struct MinimalRenderer;
+        impl Renderer for MinimalRenderer {
+            fn on_token(&mut self, _: String) {}
+            fn on_tool_call(&mut self, _: &str, _: &str) {}
+            fn on_tool_result(&mut self, _: &str, _: &str) {}
+            fn on_reasoning(&mut self, _: Option<&str>, _: Option<&str>, _: Option<u64>) {}
+            // on_auth_warning intentionally NOT overridden — uses default no-op
+        }
+        let mut r = MinimalRenderer;
+        r.on_auth_warning("should not panic");
     }
 
     // --- summarize_tool_call ---

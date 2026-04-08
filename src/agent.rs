@@ -167,6 +167,9 @@ impl<'a> Agent<'a> {
 
                 // Check permission before executing
                 let auth = on_authorize(&tc.name, &tc.arguments);
+                if let Some(warning) = &auth.warning {
+                    renderer.on_auth_warning(warning);
+                }
                 let authorized = auth.allowed;
                 let is_checkpointed = self.checkpoint_enabled
                     && authorized
@@ -2145,5 +2148,107 @@ mod tests {
         // Second call: final turn reasoning
         assert_eq!(records[1].0.as_deref(), Some("Final thoughts."));
         assert_eq!(records[1].2, Some(40));
+    }
+
+    // --- AuthorizationResult warning wiring ---
+
+    #[tokio::test]
+    async fn auth_warning_delivered_to_renderer() {
+        // Verify that when on_authorize returns a warning, the agent passes
+        // it to renderer.on_auth_warning(). This is the wiring that Phase 5
+        // depends on for destructive command warnings.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut &tmp, b"content").unwrap();
+        let path = tmp.path().to_str().unwrap();
+
+        let mock = MockGrokApi::new(vec![
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_1".into(),
+                    name: "file_read".into(),
+                    arguments: format!(r#"{{"path": "{}"}}"#, path),
+                }],
+                usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
+            },
+            TurnResponse {
+                text: "Done.".into(),
+                tool_calls: vec![],
+                usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
+            },
+        ]);
+
+        let mut renderer = crate::renderer::RecordingRenderer::new();
+        let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
+        let input = vec![json!({"role": "user", "content": "read"})];
+
+        agent
+            .run(
+                input,
+                &mut renderer,
+                &mut |_name: &str, _args: &str| AuthorizationResult {
+                    allowed: true,
+                    warning: Some("caution: destructive".into()),
+                },
+                &mut no_refresh,
+                &mut noop_entry,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(renderer.auth_warnings, vec!["caution: destructive"]);
+    }
+
+    #[tokio::test]
+    async fn auth_no_warning_means_no_renderer_call() {
+        // When warning is None, on_auth_warning should not be called.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut &tmp, b"content").unwrap();
+        let path = tmp.path().to_str().unwrap();
+
+        let mock = MockGrokApi::new(vec![
+            TurnResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_1".into(),
+                    name: "file_read".into(),
+                    arguments: format!(r#"{{"path": "{}"}}"#, path),
+                }],
+                usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
+            },
+            TurnResponse {
+                text: "Done.".into(),
+                tool_calls: vec![],
+                usage: None,
+                reasoning_content: None,
+                encrypted_reasoning: None,
+            },
+        ]);
+
+        let mut renderer = crate::renderer::RecordingRenderer::new();
+        let agent = Agent::new(&mock, std::path::Path::new("/tmp"));
+        let input = vec![json!({"role": "user", "content": "read"})];
+
+        agent
+            .run(
+                input,
+                &mut renderer,
+                &mut allow_all, // warning: None
+                &mut no_refresh,
+                &mut noop_entry,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            renderer.auth_warnings.is_empty(),
+            "on_auth_warning should not fire when warning is None"
+        );
     }
 }
