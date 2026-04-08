@@ -2,6 +2,10 @@ use serde_json::{Value, json};
 
 use crate::session::TranscriptEntry;
 
+/// The separator + header prepended to a compaction summary when inlining it
+/// into the system prompt. Must match the format string in `build_messages`.
+const SUMMARY_WRAPPER: &str = "\n\n---\n\n[Context summary from earlier in this conversation]\n\n";
+
 /// Builds the message array for the xAI Responses API from transcript entries.
 ///
 /// Converts `TranscriptEntry` variants into the correct wire format:
@@ -62,9 +66,7 @@ impl ContextAssembler {
                 .get("content")
                 .and_then(|c| c.as_str())
                 .unwrap_or("");
-            let combined = format!(
-                "{base_content}\n\n---\n\n[Context summary from earlier in this conversation]\n\n{summary}"
-            );
+            let combined = format!("{base_content}{SUMMARY_WRAPPER}{summary}");
             let mut prompt = self.system_prompt.clone();
             prompt["content"] = Value::String(combined);
             messages.push(prompt);
@@ -133,17 +135,19 @@ impl ContextAssembler {
             .sum();
 
         // The most recent CompactionSummary is inlined into the system prompt,
-        // so add its tokens to the system overhead for this estimate.
-        let summary_tokens = entries
+        // so add its tokens plus the wrapper overhead to the system estimate.
+        let summary_overhead = entries
             .iter()
             .rev()
             .find_map(|e| match e {
-                TranscriptEntry::CompactionSummary { token_estimate, .. } => Some(*token_estimate),
+                TranscriptEntry::CompactionSummary { token_estimate, .. } => {
+                    Some(*token_estimate + SUMMARY_WRAPPER.len() / 4)
+                }
                 _ => None,
             })
             .unwrap_or(0);
 
-        self.system_overhead_estimate + summary_tokens + transcript_tokens
+        self.system_overhead_estimate + summary_overhead + transcript_tokens
     }
 }
 
@@ -399,9 +403,31 @@ mod tests {
         let overhead = "You are a helpful assistant.".len() / 4; // 7
         let user_tokens = "hello world".len() / 4; // 2
         let summary_tokens = 400 / 4; // 100
+        let wrapper_tokens = SUMMARY_WRAPPER.len() / 4;
 
-        // Summary tokens counted as system overhead, not transcript
-        assert_eq!(estimate, overhead + summary_tokens + user_tokens);
+        // Summary + wrapper tokens counted as system overhead, not transcript
+        assert_eq!(
+            estimate,
+            overhead + summary_tokens + wrapper_tokens + user_tokens
+        );
+    }
+
+    #[test]
+    fn estimate_tokens_matches_actual_build_messages_size() {
+        // Verify the estimate accounts for the same content as build_messages
+        let assembler = ContextAssembler::new(test_system_prompt());
+        let entries = vec![
+            TranscriptEntry::compaction_summary("Summary of prior work"),
+            TranscriptEntry::user_message("hello"),
+        ];
+
+        let messages = assembler.build_messages(&entries);
+        let actual_system_len = messages[0]["content"].as_str().unwrap().len();
+        let actual_user_len = messages[1]["content"].as_str().unwrap().len();
+        let actual_tokens = (actual_system_len + actual_user_len) / 4;
+
+        let estimate = assembler.estimate_tokens(&entries);
+        assert_eq!(estimate, actual_tokens);
     }
 
     #[test]
@@ -416,9 +442,13 @@ mod tests {
         let estimate = assembler.estimate_tokens(&entries);
         let overhead = "You are a helpful assistant.".len() / 4;
         let user_tokens = "hello".len() / 4;
-        // Only the latest summary is counted (inlined into system prompt)
+        // Only the latest summary + wrapper is counted
         let latest_summary_tokens = "latest summary".len() / 4;
+        let wrapper_tokens = SUMMARY_WRAPPER.len() / 4;
 
-        assert_eq!(estimate, overhead + latest_summary_tokens + user_tokens);
+        assert_eq!(
+            estimate,
+            overhead + latest_summary_tokens + wrapper_tokens + user_tokens
+        );
     }
 }
