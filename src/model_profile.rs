@@ -179,7 +179,6 @@ impl ModelProfile {
     /// additional count — the API includes reasoning tokens in `output_tokens`.
     /// We therefore price `output_tokens` at the output rate without adding
     /// `reasoning_tokens` separately, which would double-count.
-    #[allow(dead_code)] // Will be used by Phase 4 cache display
     pub fn estimate_cost_from_usage(&self, usage: &crate::api::Usage) -> Option<f64> {
         if self.input_price == 0.0 && self.output_price == 0.0 {
             return None;

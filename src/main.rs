@@ -912,11 +912,18 @@ async fn main() -> Result<()> {
                 // Update session metadata
                 if let Some(usage) = &result.usage {
                     let cost_str = estimate_cost(client.model(), usage);
+                    let cached_str = match usage.cached_input_tokens {
+                        Some(c) if c > 0 => format!(" ({} cached)", format_token_count(c)),
+                        _ => String::new(),
+                    };
                     println!(
                         "{}",
                         format!(
-                            "  tokens: {} in / {} out{}",
-                            usage.input_tokens, usage.output_tokens, cost_str
+                            "  tokens: {} in{} / {} out{}",
+                            format_token_count(usage.input_tokens),
+                            cached_str,
+                            format_token_count(usage.output_tokens),
+                            cost_str
                         )
                         .dimmed()
                     );
@@ -961,6 +968,15 @@ fn estimate_cost(model: &str, usage: &api::Usage) -> String {
     match profile.estimate_cost_from_usage(usage) {
         Some(cost) => format!("  (~${cost:.4})"),
         None => String::new(),
+    }
+}
+
+/// Format a token count for display: raw number below 1000, "X.Yk" above.
+fn format_token_count(tokens: u64) -> String {
+    if tokens < 1_000 {
+        tokens.to_string()
+    } else {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
     }
 }
 
