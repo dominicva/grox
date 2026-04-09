@@ -8,6 +8,8 @@ use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::as_24_bit_terminal_escaped;
 
+use crate::{api, model_profile};
+
 /// Display callbacks for the agent loop.
 ///
 /// Encapsulates all rendering concerns: token streaming, tool call summaries,
@@ -48,6 +50,11 @@ pub struct TerminalRenderer {
     line_buffer: String,
     ss: SyntaxSet,
     ts: ThemeSet,
+    // Cumulative session stats for the between-turn status line.
+    cumulative_input_tokens: u64,
+    cumulative_output_tokens: u64,
+    cumulative_cached_tokens: u64,
+    cumulative_cost: f64,
 }
 
 impl TerminalRenderer {
@@ -58,6 +65,10 @@ impl TerminalRenderer {
             line_buffer: String::new(),
             ss: SyntaxSet::load_defaults_newlines(),
             ts: ThemeSet::load_defaults(),
+            cumulative_input_tokens: 0,
+            cumulative_output_tokens: 0,
+            cumulative_cached_tokens: 0,
+            cumulative_cost: 0.0,
         }
     }
 
@@ -92,6 +103,44 @@ impl TerminalRenderer {
         let prev = self.thinking_expanded.load(Ordering::Relaxed);
         self.thinking_expanded.store(!prev, Ordering::Relaxed);
         !prev
+    }
+
+    /// Print the "streaming..." indicator before a response begins.
+    pub fn print_streaming_indicator(&self) {
+        println!("{}", "streaming...".dimmed());
+        let _ = stdout().flush();
+    }
+
+    /// Record usage from a turn (or compaction) and accumulate cumulative stats.
+    pub fn record_usage(&mut self, model: &str, usage: &api::Usage) {
+        self.cumulative_input_tokens += usage.input_tokens;
+        self.cumulative_output_tokens += usage.output_tokens;
+        if let Some(cached) = usage.cached_input_tokens {
+            self.cumulative_cached_tokens += cached;
+        }
+        let profile = model_profile::ModelProfile::for_model(model);
+        if let Some(cost) = profile.estimate_cost_from_usage(usage) {
+            self.cumulative_cost += cost;
+        }
+    }
+
+    /// Print per-turn completion stats (replaces the old "tokens: X in / Y out" line).
+    pub fn print_turn_stats(&self, model: &str, usage: &api::Usage) {
+        let formatted = format_turn_stats(model, usage);
+        println!("{}", formatted.dimmed());
+    }
+
+    /// Print the between-turn status line with cumulative session stats.
+    pub fn print_status_line(&self, model: &str, permission_mode: &str) {
+        let formatted = format_status_line(
+            model,
+            self.cumulative_input_tokens,
+            self.cumulative_cached_tokens,
+            self.cumulative_output_tokens,
+            self.cumulative_cost,
+            permission_mode,
+        );
+        println!("{}", formatted.dimmed());
     }
 }
 
@@ -296,6 +345,60 @@ impl Renderer for RecordingRenderer {
             reasoning_tokens,
         ));
     }
+}
+
+/// Format a token count for display: raw number below 1000, "X.Yk" above.
+pub fn format_token_count(tokens: u64) -> String {
+    if tokens < 1_000 {
+        tokens.to_string()
+    } else {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    }
+}
+
+/// Format per-turn completion stats.
+pub fn format_turn_stats(model: &str, usage: &api::Usage) -> String {
+    let cached_str = match usage.cached_input_tokens {
+        Some(c) if c > 0 => format!(" ({} cached)", format_token_count(c)),
+        _ => String::new(),
+    };
+    let profile = model_profile::ModelProfile::for_model(model);
+    let cost_str = match profile.estimate_cost_from_usage(usage) {
+        Some(cost) => format!("  (~${cost:.4})"),
+        None => String::new(),
+    };
+    format!(
+        "  tokens: {} in{} / {} out{}",
+        format_token_count(usage.input_tokens),
+        cached_str,
+        format_token_count(usage.output_tokens),
+        cost_str,
+    )
+}
+
+/// Format the between-turn status line with cumulative session stats.
+pub fn format_status_line(
+    model: &str,
+    cumulative_input: u64,
+    cumulative_cached: u64,
+    cumulative_output: u64,
+    cumulative_cost: f64,
+    permission_mode: &str,
+) -> String {
+    let cached_str = if cumulative_cached > 0 {
+        format!(" ({} cached)", format_token_count(cumulative_cached))
+    } else {
+        String::new()
+    };
+    format!(
+        "{} | {} in{} / {} out | ~${:.4} | {}",
+        model,
+        format_token_count(cumulative_input),
+        cached_str,
+        format_token_count(cumulative_output),
+        cumulative_cost,
+        permission_mode,
+    )
 }
 
 /// Format a single line of markdown for terminal display.
@@ -603,5 +706,169 @@ mod tests {
         let result = summarize_tool_call("shell_exec", &args);
         assert!(result.ends_with('…'));
         assert!(result.len() <= 84); // 80 chars + "…"
+    }
+
+    // --- format_token_count ---
+
+    #[test]
+    fn format_token_count_zero() {
+        assert_eq!(format_token_count(0), "0");
+    }
+
+    #[test]
+    fn format_token_count_below_1k() {
+        assert_eq!(format_token_count(1), "1");
+        assert_eq!(format_token_count(999), "999");
+    }
+
+    #[test]
+    fn format_token_count_at_1k() {
+        assert_eq!(format_token_count(1_000), "1.0k");
+    }
+
+    #[test]
+    fn format_token_count_1500() {
+        assert_eq!(format_token_count(1_500), "1.5k");
+    }
+
+    #[test]
+    fn format_token_count_large() {
+        assert_eq!(format_token_count(100_000), "100.0k");
+    }
+
+    // --- format_turn_stats ---
+
+    #[test]
+    fn turn_stats_basic() {
+        let usage = api::Usage {
+            input_tokens: 1_200,
+            output_tokens: 300,
+            cached_input_tokens: None,
+            reasoning_tokens: None,
+        };
+        let result = format_turn_stats("grok-3-mini", &usage);
+        assert!(result.contains("1.2k in"));
+        assert!(result.contains("300 out"));
+        assert!(result.contains("(~$"));
+        assert!(!result.contains("cached"));
+    }
+
+    #[test]
+    fn turn_stats_with_cached() {
+        let usage = api::Usage {
+            input_tokens: 2_000,
+            output_tokens: 500,
+            cached_input_tokens: Some(800),
+            reasoning_tokens: None,
+        };
+        let result = format_turn_stats("grok-3-mini", &usage);
+        assert!(result.contains("2.0k in"));
+        assert!(result.contains("(800 cached)"));
+        assert!(result.contains("500 out"));
+    }
+
+    #[test]
+    fn turn_stats_unknown_model_no_cost() {
+        let usage = api::Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cached_input_tokens: None,
+            reasoning_tokens: None,
+        };
+        let result = format_turn_stats("unknown-model-xyz", &usage);
+        assert!(result.contains("100 in"));
+        assert!(result.contains("50 out"));
+        assert!(!result.contains("(~$"));
+    }
+
+    // --- format_status_line ---
+
+    #[test]
+    fn status_line_basic() {
+        let result = format_status_line("grok-3", 12_400, 0, 3_100, 0.0842, "default");
+        assert_eq!(
+            result,
+            "grok-3 | 12.4k in / 3.1k out | ~$0.0842 | default"
+        );
+    }
+
+    #[test]
+    fn status_line_with_cached() {
+        let result = format_status_line("grok-3", 12_400, 8_200, 3_100, 0.0842, "default");
+        assert_eq!(
+            result,
+            "grok-3 | 12.4k in (8.2k cached) / 3.1k out | ~$0.0842 | default"
+        );
+    }
+
+    #[test]
+    fn status_line_zero_cost() {
+        let result = format_status_line("grok-3-mini", 0, 0, 0, 0.0, "trust");
+        assert_eq!(
+            result,
+            "grok-3-mini | 0 in / 0 out | ~$0.0000 | trust"
+        );
+    }
+
+    // --- cumulative cost accumulation ---
+
+    #[test]
+    fn record_usage_accumulates() {
+        let mut r = TerminalRenderer::new();
+        let usage1 = api::Usage {
+            input_tokens: 1_000,
+            output_tokens: 500,
+            cached_input_tokens: Some(400),
+            reasoning_tokens: None,
+        };
+        let usage2 = api::Usage {
+            input_tokens: 2_000,
+            output_tokens: 300,
+            cached_input_tokens: Some(600),
+            reasoning_tokens: None,
+        };
+        r.record_usage("grok-3-mini", &usage1);
+        r.record_usage("grok-3-mini", &usage2);
+
+        assert_eq!(r.cumulative_input_tokens, 3_000);
+        assert_eq!(r.cumulative_output_tokens, 800);
+        assert_eq!(r.cumulative_cached_tokens, 1_000);
+        assert!(r.cumulative_cost > 0.0);
+    }
+
+    #[test]
+    fn record_usage_unknown_model_no_cost() {
+        let mut r = TerminalRenderer::new();
+        let usage = api::Usage {
+            input_tokens: 500,
+            output_tokens: 100,
+            cached_input_tokens: None,
+            reasoning_tokens: None,
+        };
+        r.record_usage("unknown-model-xyz", &usage);
+
+        assert_eq!(r.cumulative_input_tokens, 500);
+        assert_eq!(r.cumulative_output_tokens, 100);
+        assert_eq!(r.cumulative_cost, 0.0);
+    }
+
+    #[test]
+    fn begin_turn_preserves_cumulative_state() {
+        let mut r = TerminalRenderer::new();
+        let usage = api::Usage {
+            input_tokens: 1_000,
+            output_tokens: 500,
+            cached_input_tokens: Some(200),
+            reasoning_tokens: None,
+        };
+        r.record_usage("grok-3-mini", &usage);
+        let cost_before = r.cumulative_cost;
+
+        r.begin_turn();
+
+        assert_eq!(r.cumulative_input_tokens, 1_000);
+        assert_eq!(r.cumulative_output_tokens, 500);
+        assert_eq!(r.cumulative_cached_tokens, 200);
+        assert_eq!(r.cumulative_cost, cost_before);
     }
 }
