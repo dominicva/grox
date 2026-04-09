@@ -62,11 +62,11 @@ pub struct AuthorizationResult {
     pub warning: Option<String>,
 }
 
-/// Session-scoped permission state (tracks "always" grants per directory).
+/// Session-scoped permission state (tracks "always" grants per tool name).
 pub struct SessionPermissions {
     mode: PermissionMode,
     project_root: PathBuf,
-    always_granted_dirs: HashSet<PathBuf>,
+    always_granted_tools: HashSet<String>,
 }
 
 impl SessionPermissions {
@@ -74,7 +74,7 @@ impl SessionPermissions {
         Self {
             mode,
             project_root,
-            always_granted_dirs: HashSet::new(),
+            always_granted_tools: HashSet::new(),
         }
     }
 
@@ -115,10 +115,15 @@ impl SessionPermissions {
     /// Check whether a tool call is allowed, denied, or requires a prompt.
     pub fn check(&self, tool_name: &str, arguments: &str) -> PermissionCheck {
         let category = self.classify_tool(tool_name, arguments);
-        self.check_category(category, arguments)
+        self.check_category(tool_name, category, arguments)
     }
 
-    fn check_category(&self, category: ToolCategory, arguments: &str) -> PermissionCheck {
+    fn check_category(
+        &self,
+        tool_name: &str,
+        category: ToolCategory,
+        arguments: &str,
+    ) -> PermissionCheck {
         // 1. Yolo: allow everything
         if self.mode == PermissionMode::Yolo {
             return PermissionCheck::Allow;
@@ -134,7 +139,7 @@ impl SessionPermissions {
             return PermissionCheck::Deny;
         }
 
-        // 4. Destructive shell: always prompt, no "always" option
+        // 4. Destructive shell without grant: always prompt, no "always" option
         if category == ToolCategory::ShellDestructive {
             let cmd = extract_command(arguments);
             return PermissionCheck::Prompt {
@@ -143,12 +148,16 @@ impl SessionPermissions {
             };
         }
 
-        // 5. Check "always" grants for the target directory
-        let target_dir = self.target_dir(arguments);
-        if let Some(dir) = &target_dir
-            && self.always_granted_dirs.contains(dir)
-        {
-            return PermissionCheck::Allow;
+        // 5. Check per-tool "always" grants
+        if self.always_granted_tools.contains(tool_name) {
+            match category {
+                // In-project writes and non-destructive shell: honor the grant
+                ToolCategory::WriteInProject | ToolCategory::Shell => {
+                    return PermissionCheck::Allow;
+                }
+                // Out-of-project writes: grant doesn't apply
+                _ => {}
+            }
         }
 
         // 6. Trust mode: auto-approve writes inside project
@@ -210,8 +219,8 @@ impl SessionPermissions {
         match answer.as_str() {
             "y" | "yes" => true,
             "always" if allow_always => {
-                // We don't have the target dir here — callers should use
-                // prompt_for_tool which handles the grant.
+                // We don't have the tool name here — callers should use
+                // authorize() which handles the grant.
                 true
             }
             _ => false,
@@ -248,9 +257,7 @@ impl SessionPermissions {
                 match answer.as_str() {
                     "y" | "yes" => true,
                     "always" if *allow_always => {
-                        if let Some(dir) = self.target_dir(arguments) {
-                            self.always_granted_dirs.insert(dir);
-                        }
+                        self.always_granted_tools.insert(tool_name.to_string());
                         true
                     }
                     _ => false,
@@ -263,10 +270,10 @@ impl SessionPermissions {
         }
     }
 
-    /// Record an "always" grant for a directory.
+    /// Record an "always" grant for a tool.
     #[allow(dead_code)]
-    pub fn grant_always(&mut self, dir: PathBuf) {
-        self.always_granted_dirs.insert(dir);
+    pub fn grant_always(&mut self, tool_name: &str) {
+        self.always_granted_tools.insert(tool_name.to_string());
     }
 
     /// Resolve a path argument against the project root (relative paths are
@@ -286,19 +293,6 @@ impl SessionPermissions {
         util::validate_path(&resolved, &self.project_root).is_ok()
     }
 
-    fn target_dir(&self, arguments: &str) -> Option<PathBuf> {
-        // For writes: parent directory of the target path (resolved against project root)
-        // For shell: the cwd (defaults to project root)
-        let parsed: serde_json::Value = serde_json::from_str(arguments).ok()?;
-        if let Some(path) = parsed.get("path").and_then(|v| v.as_str()) {
-            let resolved = self.resolve_path(path);
-            return resolved.parent().map(PathBuf::from);
-        }
-        if let Some(cwd) = parsed.get("cwd").and_then(|v| v.as_str()) {
-            return Some(PathBuf::from(cwd));
-        }
-        Some(self.project_root.clone())
-    }
 }
 
 fn extract_path(arguments: &str) -> String {
@@ -515,41 +509,38 @@ mod tests {
         );
     }
 
+    // --- Per-tool "always" grants ---
+
     #[test]
-    fn always_grant_applies_to_shell_cwd() {
+    fn per_tool_grant_shell_exec() {
         let dir = tempdir().unwrap();
         let mut p = perms_with_root(PermissionMode::Default, dir.path().to_path_buf());
 
-        // Shell without cwd uses project root as target dir
+        // Shell prompts by default
         let args = r#"{"command":"ls"}"#;
         assert!(matches!(
             p.check("shell_exec", args),
             PermissionCheck::Prompt { .. }
         ));
 
-        // Grant "always" for project root
-        p.grant_always(dir.path().to_path_buf());
+        // Grant "always" for shell_exec
+        p.grant_always("shell_exec");
         assert_eq!(p.check("shell_exec", args), PermissionCheck::Allow);
 
-        // Destructive still prompts even with always grant
+        // Destructive still prompts even with shell_exec grant
         let destructive = r#"{"command":"rm -rf /tmp"}"#;
         assert!(matches!(
             p.check("shell_exec", destructive),
-            PermissionCheck::Prompt {
-                allow_always: false,
-                ..
-            }
+            PermissionCheck::Prompt { .. }
         ));
     }
 
-    // --- "Always" grants ---
-
     #[test]
-    fn always_grant_persists() {
+    fn per_tool_grant_persists_in_session() {
         let dir = tempdir().unwrap();
-        let mut p = perms_with_root(PermissionMode::Default, dir.path().to_path_buf());
         let file_path = dir.path().join("test.txt");
         let args = format!(r#"{{"path":"{}"}}"#, file_path.display());
+        let mut p = perms_with_root(PermissionMode::Default, dir.path().to_path_buf());
 
         // Before grant: prompts
         assert!(matches!(
@@ -557,32 +548,68 @@ mod tests {
             PermissionCheck::Prompt { .. }
         ));
 
-        // Grant "always" for the directory
-        p.grant_always(dir.path().to_path_buf());
+        // Grant "always" for file_write
+        p.grant_always("file_write");
 
-        // After grant: allowed
+        // After grant: allowed (in-project)
         assert_eq!(p.check("file_write", &args), PermissionCheck::Allow);
     }
 
     #[test]
-    fn always_grant_is_per_directory() {
+    fn per_tool_grant_is_per_tool_not_per_category() {
         let dir = tempdir().unwrap();
-        let sub = dir.path().join("subdir");
-        std::fs::create_dir(&sub).unwrap();
-
+        let file_path = dir.path().join("test.txt");
         let mut p = perms_with_root(PermissionMode::Default, dir.path().to_path_buf());
 
-        // Grant for root dir only
-        p.grant_always(dir.path().to_path_buf());
+        // Grant for file_write only
+        p.grant_always("file_write");
 
-        // File in root dir: allowed (parent is the root)
-        let args_root = format!(r#"{{"path":"{}"}}"#, dir.path().join("file.txt").display());
-        assert_eq!(p.check("file_write", &args_root), PermissionCheck::Allow);
+        // file_write: allowed
+        let write_args = format!(r#"{{"path":"{}","content":"x"}}"#, file_path.display());
+        assert_eq!(p.check("file_write", &write_args), PermissionCheck::Allow);
 
-        // File in subdir: still prompts (different dir)
-        let args_sub = format!(r#"{{"path":"{}"}}"#, sub.join("file.txt").display());
+        // file_edit: still prompts (different tool)
+        let edit_args = format!(
+            r#"{{"path":"{}","old_string":"a","new_string":"b"}}"#,
+            file_path.display()
+        );
         assert!(matches!(
-            p.check("file_write", &args_sub),
+            p.check("file_edit", &edit_args),
+            PermissionCheck::Prompt { .. }
+        ));
+    }
+
+    #[test]
+    fn per_tool_grant_outside_project_still_prompts() {
+        let dir = tempdir().unwrap();
+        let other = tempdir().unwrap();
+        let file_path = other.path().join("escape.txt");
+        let args = format!(r#"{{"path":"{}"}}"#, file_path.display());
+        let mut p = perms_with_root(PermissionMode::Default, dir.path().to_path_buf());
+
+        p.grant_always("file_write");
+
+        // Outside project: still prompts despite grant
+        assert!(matches!(
+            p.check("file_write", &args),
+            PermissionCheck::Prompt { .. }
+        ));
+    }
+
+    #[test]
+    fn per_tool_grants_reset_on_new_session() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        let args = format!(r#"{{"path":"{}"}}"#, file_path.display());
+
+        let mut p1 = perms_with_root(PermissionMode::Default, dir.path().to_path_buf());
+        p1.grant_always("file_write");
+        assert_eq!(p1.check("file_write", &args), PermissionCheck::Allow);
+
+        // New session: grants are empty
+        let p2 = perms_with_root(PermissionMode::Default, dir.path().to_path_buf());
+        assert!(matches!(
+            p2.check("file_write", &args),
             PermissionCheck::Prompt { .. }
         ));
     }
