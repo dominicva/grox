@@ -105,6 +105,15 @@ impl TerminalRenderer {
         !prev
     }
 
+    /// Seed cumulative state from persisted session data (for resume).
+    /// Replaces current state, so also acts as a reset on `/resume`.
+    pub fn seed_cumulative(&mut self, input: u64, output: u64, cached: u64, cost: f64) {
+        self.cumulative_input_tokens = input;
+        self.cumulative_output_tokens = output;
+        self.cumulative_cached_tokens = cached;
+        self.cumulative_cost = cost;
+    }
+
     /// Print the "streaming..." indicator before a response begins.
     pub fn print_streaming_indicator(&self) {
         println!("{}", "streaming...".dimmed());
@@ -356,10 +365,10 @@ pub fn format_token_count(tokens: u64) -> String {
     }
 }
 
-/// Format per-turn completion stats.
+/// Format per-turn completion stats with exact (non-abbreviated) token counts.
 pub fn format_turn_stats(model: &str, usage: &api::Usage) -> String {
     let cached_str = match usage.cached_input_tokens {
-        Some(c) if c > 0 => format!(" ({} cached)", format_token_count(c)),
+        Some(c) if c > 0 => format!(" ({c} cached)"),
         _ => String::new(),
     };
     let profile = model_profile::ModelProfile::for_model(model);
@@ -369,9 +378,9 @@ pub fn format_turn_stats(model: &str, usage: &api::Usage) -> String {
     };
     format!(
         "  tokens: {} in{} / {} out{}",
-        format_token_count(usage.input_tokens),
+        usage.input_tokens,
         cached_str,
-        format_token_count(usage.output_tokens),
+        usage.output_tokens,
         cost_str,
     )
 }
@@ -739,7 +748,7 @@ mod tests {
     // --- format_turn_stats ---
 
     #[test]
-    fn turn_stats_basic() {
+    fn turn_stats_exact_counts() {
         let usage = api::Usage {
             input_tokens: 1_200,
             output_tokens: 300,
@@ -747,7 +756,7 @@ mod tests {
             reasoning_tokens: None,
         };
         let result = format_turn_stats("grok-3-mini", &usage);
-        assert!(result.contains("1.2k in"));
+        assert!(result.contains("1200 in"), "expected exact count, got: {result}");
         assert!(result.contains("300 out"));
         assert!(result.contains("(~$"));
         assert!(!result.contains("cached"));
@@ -762,7 +771,7 @@ mod tests {
             reasoning_tokens: None,
         };
         let result = format_turn_stats("grok-3-mini", &usage);
-        assert!(result.contains("2.0k in"));
+        assert!(result.contains("2000 in"), "expected exact count, got: {result}");
         assert!(result.contains("(800 cached)"));
         assert!(result.contains("500 out"));
     }
@@ -850,6 +859,26 @@ mod tests {
         assert_eq!(r.cumulative_input_tokens, 500);
         assert_eq!(r.cumulative_output_tokens, 100);
         assert_eq!(r.cumulative_cost, 0.0);
+    }
+
+    #[test]
+    fn seed_cumulative_replaces_state() {
+        let mut r = TerminalRenderer::new();
+        let usage = api::Usage {
+            input_tokens: 500,
+            output_tokens: 200,
+            cached_input_tokens: Some(100),
+            reasoning_tokens: None,
+        };
+        r.record_usage("grok-3-mini", &usage);
+        assert_eq!(r.cumulative_input_tokens, 500);
+
+        // Seed replaces, not adds
+        r.seed_cumulative(1_000, 400, 300, 0.05);
+        assert_eq!(r.cumulative_input_tokens, 1_000);
+        assert_eq!(r.cumulative_output_tokens, 400);
+        assert_eq!(r.cumulative_cached_tokens, 300);
+        assert!((r.cumulative_cost - 0.05).abs() < 1e-10);
     }
 
     #[test]
