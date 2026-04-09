@@ -835,6 +835,7 @@ async fn main() -> Result<()> {
         {
             // Always account for LLM usage even if compaction didn't reduce size
             if let Some(u) = &result.llm_usage {
+                term_renderer.record_usage(client.model(), u);
                 session_meta.cumulative_input_tokens += u.input_tokens;
                 session_meta.cumulative_output_tokens += u.output_tokens;
                 let _ = session_meta.save(&sessions_dir);
@@ -864,8 +865,9 @@ async fn main() -> Result<()> {
         let api_input = assembler.build_messages(&history);
 
         println!();
-
         term_renderer.begin_turn();
+        term_renderer.print_streaming_indicator();
+
         let agent = Agent::new(&client, &project_root);
         let run_result = agent
             .run(
@@ -914,27 +916,17 @@ async fn main() -> Result<()> {
                 }
                 println!();
 
-                // Update session metadata
+                // Update session metadata and display stats
                 if let Some(usage) = &result.usage {
-                    let cost_str = estimate_cost(client.model(), usage);
-                    let cached_str = match usage.cached_input_tokens {
-                        Some(c) if c > 0 => format!(" ({} cached)", format_token_count(c)),
-                        _ => String::new(),
-                    };
-                    println!(
-                        "{}",
-                        format!(
-                            "  tokens: {} in{} / {} out{}",
-                            format_token_count(usage.input_tokens),
-                            cached_str,
-                            format_token_count(usage.output_tokens),
-                            cost_str
-                        )
-                        .dimmed()
-                    );
+                    term_renderer.record_usage(client.model(), usage);
+                    term_renderer.print_turn_stats(client.model(), usage);
                     session_meta.cumulative_input_tokens += usage.input_tokens;
                     session_meta.cumulative_output_tokens += usage.output_tokens;
                 }
+                term_renderer.print_status_line(
+                    client.model(),
+                    permission_mode.short_name(),
+                );
                 session_meta.last_active = Utc::now();
                 // Best-effort metadata save — don't fail the session on metadata errors
                 let _ = session_meta.save(&sessions_dir);
@@ -966,66 +958,3 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Best-effort cost estimate. Returns empty string if pricing is unknown.
-/// Uses full usage details (cached tokens, reasoning tokens) when available.
-fn estimate_cost(model: &str, usage: &api::Usage) -> String {
-    let profile = model_profile::ModelProfile::for_model(model);
-    match profile.estimate_cost_from_usage(usage) {
-        Some(cost) => format!("  (~${cost:.4})"),
-        None => String::new(),
-    }
-}
-
-/// Format a token count for display: raw number below 1000, "X.Yk" above.
-fn format_token_count(tokens: u64) -> String {
-    if tokens < 1_000 {
-        tokens.to_string()
-    } else {
-        format!("{:.1}k", tokens as f64 / 1_000.0)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn format_token_count_below_1k() {
-        assert_eq!(format_token_count(0), "0");
-        assert_eq!(format_token_count(1), "1");
-        assert_eq!(format_token_count(999), "999");
-    }
-
-    #[test]
-    fn format_token_count_at_and_above_1k() {
-        assert_eq!(format_token_count(1_000), "1.0k");
-        assert_eq!(format_token_count(1_234), "1.2k");
-        assert_eq!(format_token_count(12_345), "12.3k");
-        assert_eq!(format_token_count(100_000), "100.0k");
-    }
-
-    #[test]
-    fn estimate_cost_known_model_with_cached_tokens() {
-        let usage = api::Usage {
-            input_tokens: 1_000,
-            output_tokens: 500,
-            cached_input_tokens: Some(400),
-            reasoning_tokens: None,
-        };
-        let cost_str = estimate_cost("grok-3", &usage);
-        assert!(cost_str.starts_with("  (~$"), "got: {cost_str}");
-        assert!(!cost_str.is_empty());
-    }
-
-    #[test]
-    fn estimate_cost_unknown_model_returns_empty() {
-        let usage = api::Usage {
-            input_tokens: 1_000,
-            output_tokens: 500,
-            cached_input_tokens: None,
-            reasoning_tokens: None,
-        };
-        let cost_str = estimate_cost("unknown-model", &usage);
-        assert_eq!(cost_str, "");
-    }
-}
