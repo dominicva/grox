@@ -54,9 +54,9 @@ pub enum PermissionCheck {
 }
 
 /// Result returned by the authorization callback to the agent.
-/// Phase 5 will populate the `warning` field for destructive commands.
+/// The `warning` field is set for destructive commands that are auto-approved
+/// (via "always" grant), so the renderer can display the warning.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct AuthorizationResult {
     pub allowed: bool,
     pub warning: Option<String>,
@@ -139,25 +139,28 @@ impl SessionPermissions {
             return PermissionCheck::Deny;
         }
 
-        // 4. Destructive shell without grant: always prompt, no "always" option
-        if category == ToolCategory::ShellDestructive {
-            let cmd = extract_command(arguments);
-            return PermissionCheck::Prompt {
-                message: format!("Run destructive command: {cmd}"),
-                allow_always: false,
-            };
-        }
-
-        // 5. Check per-tool "always" grants
+        // 4. Check per-tool "always" grants
         if self.always_granted_tools.contains(tool_name) {
             match category {
-                // In-project writes and non-destructive shell: honor the grant
-                ToolCategory::WriteInProject | ToolCategory::Shell => {
+                // In-project writes and shell (including destructive): honor grant.
+                // Destructive commands auto-execute but authorize() attaches a warning.
+                ToolCategory::WriteInProject
+                | ToolCategory::Shell
+                | ToolCategory::ShellDestructive => {
                     return PermissionCheck::Allow;
                 }
                 // Out-of-project writes: grant doesn't apply
                 _ => {}
             }
+        }
+
+        // 5. Destructive shell without grant: prompt with "always" option
+        if category == ToolCategory::ShellDestructive {
+            let cmd = extract_command(arguments);
+            return PermissionCheck::Prompt {
+                message: format!("Run: {cmd}"),
+                allow_always: true,
+            };
         }
 
         // 6. Trust mode: auto-approve writes inside project
@@ -228,15 +231,38 @@ impl SessionPermissions {
     }
 
     /// Full permission flow for a tool call: check, prompt if needed, record grants.
+    ///
+    /// For destructive commands:
+    /// - Prompted: shows a warning line before the prompt (user sees it inline)
+    /// - Auto-approved via "always" grant: sets `warning` on the result so the
+    ///   renderer displays it via `on_auth_warning`
+    /// - Auto-approved via Yolo: no warning (user opted into no guardrails)
     pub fn authorize(&mut self, tool_name: &str, arguments: &str) -> AuthorizationResult {
+        let category = self.classify_tool(tool_name, arguments);
+        let is_destructive = category == ToolCategory::ShellDestructive;
         let check = self.check(tool_name, arguments);
+
+        let mut was_auto_approved = false;
         let allowed = match &check {
-            PermissionCheck::Allow => true,
+            PermissionCheck::Allow => {
+                was_auto_approved = true;
+                true
+            }
             PermissionCheck::Deny => false,
             PermissionCheck::Prompt {
                 message,
                 allow_always,
             } => {
+                // Show warning line before prompting for destructive commands
+                if is_destructive {
+                    let cmd = extract_command(arguments);
+                    eprintln!(
+                        "  {} {}",
+                        "\u{26a0}".yellow(),
+                        format!("destructive command: {cmd}").yellow()
+                    );
+                }
+
                 let options = if *allow_always {
                     "[y/n/always]"
                 } else {
@@ -264,10 +290,19 @@ impl SessionPermissions {
                 }
             }
         };
-        AuthorizationResult {
-            allowed,
-            warning: None,
-        }
+
+        // Attach warning for auto-approved destructive commands so the renderer
+        // can display it. Yolo mode suppresses warnings (user opted out).
+        let warning = if is_destructive && allowed && was_auto_approved
+            && self.mode != PermissionMode::Yolo
+        {
+            let cmd = extract_command(arguments);
+            Some(format!("destructive command: {cmd}"))
+        } else {
+            None
+        };
+
+        AuthorizationResult { allowed, warning }
     }
 
     /// Record an "always" grant for a tool.
@@ -449,13 +484,13 @@ mod tests {
     }
 
     #[test]
-    fn destructive_command_no_always() {
+    fn destructive_command_allows_always() {
         let p = perms(PermissionMode::Default);
         let check = p.check("shell_exec", r#"{"command":"rm -rf /tmp/stuff"}"#);
         assert!(matches!(
             check,
             PermissionCheck::Prompt {
-                allow_always: false,
+                allow_always: true,
                 ..
             }
         ));
@@ -468,7 +503,7 @@ mod tests {
         assert!(matches!(
             check,
             PermissionCheck::Prompt {
-                allow_always: false,
+                allow_always: true,
                 ..
             }
         ));
@@ -527,12 +562,9 @@ mod tests {
         p.grant_always("shell_exec");
         assert_eq!(p.check("shell_exec", args), PermissionCheck::Allow);
 
-        // Destructive still prompts even with shell_exec grant
+        // Destructive also auto-approved with grant (warning handled in authorize)
         let destructive = r#"{"command":"rm -rf /tmp"}"#;
-        assert!(matches!(
-            p.check("shell_exec", destructive),
-            PermissionCheck::Prompt { .. }
-        ));
+        assert_eq!(p.check("shell_exec", destructive), PermissionCheck::Allow);
     }
 
     #[test]
@@ -735,5 +767,101 @@ mod tests {
         assert!(!is_destructive_command("cargo test"));
         assert!(!is_destructive_command("git status"));
         assert!(!is_destructive_command("echo hello"));
+    }
+
+    // --- Destructive warning behavior ---
+
+    #[test]
+    fn destructive_grant_auto_approves_with_check() {
+        let dir = tempdir().unwrap();
+        let mut p = perms_with_root(PermissionMode::Default, dir.path().to_path_buf());
+
+        // Without grant: prompts
+        let args = r#"{"command":"rm -rf /tmp"}"#;
+        assert!(matches!(
+            p.check("shell_exec", args),
+            PermissionCheck::Prompt { allow_always: true, .. }
+        ));
+
+        // With grant: auto-approved at check level
+        p.grant_always("shell_exec");
+        assert_eq!(p.check("shell_exec", args), PermissionCheck::Allow);
+    }
+
+    #[test]
+    fn yolo_destructive_no_warning() {
+        // Yolo allows everything — check returns Allow, and authorize would
+        // not set a warning (mode == Yolo suppresses it).
+        let p = perms(PermissionMode::Yolo);
+        assert_eq!(
+            p.check("shell_exec", r#"{"command":"rm -rf /"}"#),
+            PermissionCheck::Allow,
+        );
+    }
+
+    #[test]
+    fn readonly_denies_destructive() {
+        let p = perms(PermissionMode::ReadOnly);
+        assert_eq!(
+            p.check("shell_exec", r#"{"command":"rm -rf /"}"#),
+            PermissionCheck::Deny,
+        );
+    }
+
+    // --- Mode interactions with per-tool grants ---
+
+    #[test]
+    fn trust_with_shell_grant_auto_approves() {
+        let dir = tempdir().unwrap();
+        let mut p = perms_with_root(PermissionMode::Trust, dir.path().to_path_buf());
+
+        // Trust prompts for shell by default
+        assert!(matches!(
+            p.check("shell_exec", r#"{"command":"cargo build"}"#),
+            PermissionCheck::Prompt { .. }
+        ));
+
+        // With grant: auto-approved
+        p.grant_always("shell_exec");
+        assert_eq!(
+            p.check("shell_exec", r#"{"command":"cargo build"}"#),
+            PermissionCheck::Allow,
+        );
+
+        // Destructive also auto-approved with grant
+        assert_eq!(
+            p.check("shell_exec", r#"{"command":"rm -rf /tmp"}"#),
+            PermissionCheck::Allow,
+        );
+    }
+
+    #[test]
+    fn readonly_ignores_grants() {
+        let dir = tempdir().unwrap();
+        let mut p = perms_with_root(PermissionMode::ReadOnly, dir.path().to_path_buf());
+        p.grant_always("file_write");
+        p.grant_always("shell_exec");
+
+        // ReadOnly denies everything regardless of grants
+        let file_args = format!(r#"{{"path":"{}"}}"#, dir.path().join("test.txt").display());
+        assert_eq!(p.check("file_write", &file_args), PermissionCheck::Deny);
+        assert_eq!(
+            p.check("shell_exec", r#"{"command":"ls"}"#),
+            PermissionCheck::Deny,
+        );
+    }
+
+    #[test]
+    fn yolo_ignores_grants() {
+        // Yolo allows everything without needing grants
+        let p = perms(PermissionMode::Yolo);
+        assert_eq!(
+            p.check("file_write", r#"{"path":"x"}"#),
+            PermissionCheck::Allow,
+        );
+        assert_eq!(
+            p.check("shell_exec", r#"{"command":"rm -rf /"}"#),
+            PermissionCheck::Allow,
+        );
     }
 }

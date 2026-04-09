@@ -25,9 +25,9 @@ pub trait Renderer: Send {
     /// Called after a tool finishes executing, with its output.
     fn on_tool_result(&mut self, name: &str, output: &str);
 
-    /// Called when authorization produces a warning (e.g. destructive command).
-    /// Phase 5 will populate these; until then the warning is always `None`
-    /// and this method is a no-op pass-through.
+    /// Called when authorization produces a warning (e.g. destructive command
+    /// auto-approved via "always" grant). Displayed to the user before the tool
+    /// executes so they are aware of the risk.
     fn on_auth_warning(&mut self, _warning: &str) {}
 
     /// Called when the model emits reasoning content.
@@ -174,6 +174,11 @@ impl Renderer for TerminalRenderer {
         let summary = summarize_tool_call(name, args);
         println!("  {} {}", format!("▸ {name}").cyan(), summary.dimmed());
         let _ = stdout().flush();
+    }
+
+    fn on_auth_warning(&mut self, warning: &str) {
+        self.flush_line_buffer();
+        eprintln!("  {} {}", "\u{26a0}".yellow(), warning.yellow());
     }
 
     fn on_tool_result(&mut self, name: &str, output: &str) {
@@ -564,7 +569,7 @@ mod tests {
     #[test]
     fn default_on_auth_warning_is_noop() {
         // Verify the default trait method compiles and doesn't panic.
-        // TerminalRenderer inherits the default no-op; Phase 5 will override it.
+        // Renderers that don't override on_auth_warning get a no-op.
         struct MinimalRenderer;
         impl Renderer for MinimalRenderer {
             fn on_token(&mut self, _: String) {}
