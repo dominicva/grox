@@ -163,6 +163,49 @@ impl ModelProfile {
         .collect()
     }
 
+    /// Format this profile for the interactive model picker.
+    /// Shows model name, context window, reasoning capabilities, and pricing.
+    pub fn format_for_picker(&self, current_model: &str) -> String {
+        let ctx = format_context_window(self.context_window);
+
+        let mut caps = Vec::new();
+        if self.returns_plaintext_reasoning {
+            caps.push("plaintext reasoning");
+        } else if self.returns_encrypted_reasoning {
+            caps.push("encrypted reasoning");
+        }
+        if self.supports_reasoning_effort_control {
+            caps.push("effort control");
+        }
+        let reasoning = if caps.is_empty() {
+            "\u{2014}".to_string()
+        } else {
+            caps.join(", ")
+        };
+
+        let price = if self.input_price > 0.0 || self.output_price > 0.0 {
+            format!("${:.2}/${:.2} per 1M", self.input_price, self.output_price)
+        } else {
+            "unknown pricing".to_string()
+        };
+
+        let marker = if self.name == current_model {
+            "  \u{2190} current"
+        } else {
+            ""
+        };
+        let compat = if !self.supports_tools {
+            "  [incompatible]"
+        } else {
+            ""
+        };
+
+        format!(
+            "{:<28} {:>5} ctx  {:<35} {}{}{}",
+            self.name, ctx, reasoning, price, marker, compat
+        )
+    }
+
     /// Whether this model has any reasoning capability (plaintext or encrypted).
     /// Used by Phase 3 reasoning support; tested now, called later.
     #[allow(dead_code)]
@@ -209,6 +252,14 @@ impl ModelProfile {
             non_cached as f64 * self.input_price + cached as f64 * self.cached_input_price;
         let output_cost = usage.output_tokens as f64 * self.output_price;
         Some((input_cost + output_cost) / 1_000_000.0)
+    }
+}
+
+fn format_context_window(tokens: usize) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else {
+        format!("{}K", tokens / 1_000)
     }
 }
 
@@ -467,6 +518,60 @@ mod tests {
         for (name, profile) in ModelProfile::known_models() {
             assert!(profile.supports_tools, "{name} should support tools");
         }
+    }
+
+    // --- format_for_picker ---
+
+    #[test]
+    fn format_for_picker_current_model_marked() {
+        let profile = ModelProfile::for_model("grok-3");
+        let display = profile.format_for_picker("grok-3");
+        assert!(display.contains("current"), "current model should be marked");
+    }
+
+    #[test]
+    fn format_for_picker_non_current_not_marked() {
+        let profile = ModelProfile::for_model("grok-3");
+        let display = profile.format_for_picker("grok-4-1-fast-reasoning");
+        assert!(!display.contains("current"));
+    }
+
+    #[test]
+    fn format_for_picker_shows_context_window() {
+        let p = ModelProfile::for_model("grok-4-1-fast-reasoning");
+        assert!(p.format_for_picker("other").contains("2.1M"));
+
+        let p = ModelProfile::for_model("grok-3");
+        assert!(p.format_for_picker("other").contains("131K"));
+    }
+
+    #[test]
+    fn format_for_picker_shows_reasoning() {
+        let p = ModelProfile::for_model("grok-4-1-fast-reasoning");
+        assert!(p.format_for_picker("other").contains("encrypted reasoning"));
+
+        let p = ModelProfile::for_model("grok-3-mini");
+        assert!(p.format_for_picker("other").contains("plaintext reasoning"));
+    }
+
+    #[test]
+    fn format_for_picker_shows_pricing() {
+        let p = ModelProfile::for_model("grok-3");
+        assert!(p.format_for_picker("other").contains("$3.00/$15.00"));
+    }
+
+    // --- format_context_window ---
+
+    #[test]
+    fn format_context_window_millions() {
+        assert_eq!(format_context_window(2_097_152), "2.1M");
+        assert_eq!(format_context_window(1_000_000), "1.0M");
+    }
+
+    #[test]
+    fn format_context_window_thousands() {
+        assert_eq!(format_context_window(131_072), "131K");
+        assert_eq!(format_context_window(80_000), "80K");
     }
 
     #[test]

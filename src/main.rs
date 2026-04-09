@@ -28,6 +28,18 @@ use rustyline::{Editor, EventHandler, KeyCode, KeyEvent, Modifiers};
 use serde_json::json;
 use session::{SessionIndex, SessionMeta, Transcript, TranscriptEntry};
 
+/// A model choice for the interactive picker.
+struct ModelPickerChoice {
+    name: String,
+    display: String,
+}
+
+impl std::fmt::Display for ModelPickerChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.display)
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "grox", about = "Agentic coding with Grok")]
 struct Cli {
@@ -410,7 +422,69 @@ async fn main() -> Result<()> {
                     Command::Model => {
                         let new_model = args.to_string();
                         if new_model.is_empty() {
-                            println!("{}", "usage: /model <name>".dimmed());
+                            // Interactive model picker
+                            let models = model_profile::ModelProfile::known_models();
+                            let current = client.model().to_string();
+
+                            let choices: Vec<ModelPickerChoice> = models
+                                .iter()
+                                .map(|(_, profile)| ModelPickerChoice {
+                                    name: profile.name.clone(),
+                                    display: profile.format_for_picker(&current),
+                                })
+                                .collect();
+
+                            let starting_cursor = choices
+                                .iter()
+                                .position(|c| c.name == current)
+                                .unwrap_or(0);
+
+                            match inquire::Select::new("select a model:", choices)
+                                .with_starting_cursor(starting_cursor)
+                                .with_page_size(10)
+                                .prompt()
+                            {
+                                Ok(choice) => {
+                                    if choice.name == current {
+                                        println!(
+                                            "{}",
+                                            format!("  already using {}", current).dimmed()
+                                        );
+                                    } else {
+                                        let profile =
+                                            model_profile::ModelProfile::for_model(&choice.name);
+                                        if !profile.supports_tools {
+                                            println!(
+                                                "{}",
+                                                format!(
+                                                    "  model {} does not support tool use",
+                                                    choice.name
+                                                )
+                                                .red()
+                                            );
+                                        } else {
+                                            client.set_model(choice.name.clone());
+                                            session_meta.model = choice.name.clone();
+                                            println!(
+                                                "  model switched to {}",
+                                                choice.name.cyan()
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(
+                                    inquire::InquireError::OperationCanceled
+                                    | inquire::InquireError::OperationInterrupted,
+                                ) => {
+                                    // User pressed Escape or Ctrl+C — cancel silently
+                                }
+                                Err(e) => {
+                                    println!(
+                                        "{}",
+                                        format!("  model picker error: {e}").red()
+                                    );
+                                }
+                            }
                         } else {
                             let profile = model_profile::ModelProfile::for_model(&new_model);
                             if !profile.supports_tools {
