@@ -144,6 +144,25 @@ impl ModelProfile {
         }
     }
 
+    /// Returns all canonical model entries as (name, profile) pairs.
+    /// Makes the pattern-match-based `for_model()` lookup iterable for the
+    /// interactive model picker.
+    pub fn known_models() -> Vec<(String, ModelProfile)> {
+        [
+            "grok-4-1-fast-reasoning",
+            "grok-4-1-non-reasoning",
+            "grok-4.20-multi-agent",
+            "grok-3",
+            "grok-3-fast",
+            "grok-3-mini",
+            "grok-3-mini-fast",
+            "grok-2",
+        ]
+        .iter()
+        .map(|&name| (name.to_string(), Self::for_model(name)))
+        .collect()
+    }
+
     /// Whether this model has any reasoning capability (plaintext or encrypted).
     /// Used by Phase 3 reasoning support; tested now, called later.
     #[allow(dead_code)]
@@ -414,6 +433,40 @@ mod tests {
         assert_eq!(p.compaction_threshold(), p.effective_ceiling * 60 / 100);
         // 1_200_000 * 60 / 100 = 720_000
         assert_eq!(p.compaction_threshold(), 720_000);
+    }
+
+    // --- known_models() ---
+
+    #[test]
+    fn known_models_returns_all_families() {
+        let models = ModelProfile::known_models();
+        let names: Vec<&str> = models.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"grok-4-1-fast-reasoning"));
+        assert!(names.contains(&"grok-4-1-non-reasoning"));
+        assert!(names.contains(&"grok-4.20-multi-agent"));
+        assert!(names.contains(&"grok-3"));
+        assert!(names.contains(&"grok-3-fast"));
+        assert!(names.contains(&"grok-3-mini"));
+        assert!(names.contains(&"grok-3-mini-fast"));
+        assert!(names.contains(&"grok-2"));
+    }
+
+    #[test]
+    fn known_models_entries_match_for_model() {
+        for (name, profile) in ModelProfile::known_models() {
+            let expected = ModelProfile::for_model(&name);
+            assert_eq!(
+                profile, expected,
+                "known_models entry for '{name}' differs from for_model()"
+            );
+        }
+    }
+
+    #[test]
+    fn known_models_all_support_tools() {
+        for (name, profile) in ModelProfile::known_models() {
+            assert!(profile.supports_tools, "{name} should support tools");
+        }
     }
 
     #[test]
