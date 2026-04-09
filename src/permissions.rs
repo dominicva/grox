@@ -324,8 +324,58 @@ impl SessionPermissions {
 
     fn is_inside_project(&self, path: &str) -> bool {
         let resolved = self.resolve_path(path);
-        // Try to validate — if it resolves inside project root, it's inside
-        util::validate_path(&resolved, &self.project_root).is_ok()
+        // Try symlink-safe validation first (handles existing paths).
+        if util::validate_path(&resolved, &self.project_root).is_ok() {
+            return true;
+        }
+        // Fallback for paths whose parent directories don't exist yet
+        // (file_write creates them). Normalize `.`/`..` components, then
+        // walk up to the deepest existing ancestor and canonicalize it to
+        // resolve symlinks (e.g. /var → /private/var on macOS).
+        let canonical_root = match self.project_root.canonicalize() {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+
+        // Phase 1: normalize . and .. (no filesystem access)
+        let mut parts: Vec<std::path::Component> = Vec::new();
+        for c in resolved.components() {
+            match c {
+                std::path::Component::ParentDir => {
+                    if matches!(parts.last(), Some(std::path::Component::Normal(_))) {
+                        parts.pop();
+                    } else {
+                        parts.push(c);
+                    }
+                }
+                std::path::Component::CurDir => {}
+                _ => parts.push(c),
+            }
+        }
+        let normalized: PathBuf = parts.iter().collect();
+
+        // Phase 2: walk up to deepest existing ancestor, canonicalize it
+        // (resolves OS-level symlinks), then reattach the new-directory tail.
+        let mut ancestor = normalized.as_path();
+        let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+        while !ancestor.exists() {
+            match (ancestor.file_name(), ancestor.parent()) {
+                (Some(name), Some(parent)) => {
+                    tail.push(name);
+                    ancestor = parent;
+                }
+                _ => return false,
+            }
+        }
+        let canonical_ancestor = match ancestor.canonicalize() {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        let mut full = canonical_ancestor;
+        for part in tail.into_iter().rev() {
+            full.push(part);
+        }
+        full.starts_with(&canonical_root)
     }
 
 }
@@ -678,6 +728,43 @@ mod tests {
             ToolCategory::WriteInProject
         );
         assert_eq!(p.check("file_edit", args), PermissionCheck::Allow);
+    }
+
+    #[test]
+    fn new_file_in_new_subdirectory_classified_as_in_project() {
+        let dir = tempdir().unwrap();
+        // src/new/ does NOT exist yet — file_write will create it on execution
+        let p = perms_with_root(PermissionMode::Trust, dir.path().to_path_buf());
+        let args = r#"{"path":"src/new/module.rs","content":"hello"}"#;
+        assert_eq!(
+            p.classify_tool("file_write", args),
+            ToolCategory::WriteInProject
+        );
+        // Trust mode should auto-approve this (not prompt)
+        assert_eq!(p.check("file_write", args), PermissionCheck::Allow);
+    }
+
+    #[test]
+    fn new_file_in_new_subdirectory_with_grant_auto_approves() {
+        let dir = tempdir().unwrap();
+        let mut p = perms_with_root(PermissionMode::Default, dir.path().to_path_buf());
+        p.grant_always("file_write");
+
+        // src/deep/nested/ does NOT exist yet
+        let args = r#"{"path":"src/deep/nested/file.rs","content":"x"}"#;
+        assert_eq!(p.check("file_write", args), PermissionCheck::Allow);
+    }
+
+    #[test]
+    fn dotdot_escape_in_new_path_classified_as_outside() {
+        let dir = tempdir().unwrap();
+        let p = perms_with_root(PermissionMode::Trust, dir.path().to_path_buf());
+        // Tries to escape via ..
+        let args = r#"{"path":"src/../../escape.txt","content":"x"}"#;
+        assert_eq!(
+            p.classify_tool("file_write", args),
+            ToolCategory::WriteOutsideProject
+        );
     }
 
     // --- file_edit permission tests ---
