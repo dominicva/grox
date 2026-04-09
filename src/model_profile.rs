@@ -163,9 +163,24 @@ impl ModelProfile {
         .collect()
     }
 
+    /// Whether two profiles belong to the same model family (all fields equal
+    /// except `name`). Used by the picker to match non-canonical names like
+    /// `grok-4-1-fast-reasoning-0415` to the canonical `grok-4-1-fast-reasoning`.
+    pub fn same_family(&self, other: &ModelProfile) -> bool {
+        self.input_price == other.input_price
+            && self.cached_input_price == other.cached_input_price
+            && self.output_price == other.output_price
+            && self.context_window == other.context_window
+            && self.effective_ceiling == other.effective_ceiling
+            && self.supports_reasoning_effort_control == other.supports_reasoning_effort_control
+            && self.returns_plaintext_reasoning == other.returns_plaintext_reasoning
+            && self.returns_encrypted_reasoning == other.returns_encrypted_reasoning
+            && self.supports_tools == other.supports_tools
+    }
+
     /// Format this profile for the interactive model picker.
     /// Shows model name, context window, reasoning capabilities, and pricing.
-    pub fn format_for_picker(&self, current_model: &str) -> String {
+    pub fn format_for_picker(&self, current_profile: &ModelProfile) -> String {
         let ctx = format_context_window(self.context_window);
 
         let mut caps = Vec::new();
@@ -189,7 +204,7 @@ impl ModelProfile {
             "unknown pricing".to_string()
         };
 
-        let marker = if self.name == current_model {
+        let marker = if self.same_family(current_profile) {
             "  \u{2190} current"
         } else {
             ""
@@ -520,44 +535,97 @@ mod tests {
         }
     }
 
+    // --- same_family ---
+
+    #[test]
+    fn same_family_canonical_match() {
+        let a = ModelProfile::for_model("grok-3");
+        let b = ModelProfile::for_model("grok-3");
+        assert!(a.same_family(&b));
+    }
+
+    #[test]
+    fn same_family_date_suffix_matches_canonical() {
+        let canonical = ModelProfile::for_model("grok-4-1-fast-reasoning");
+        let dated = ModelProfile::for_model("grok-4-1-fast-reasoning-0415");
+        assert!(canonical.same_family(&dated));
+    }
+
+    #[test]
+    fn same_family_bare_grok4_matches_reasoning() {
+        let bare = ModelProfile::for_model("grok-4");
+        let canonical = ModelProfile::for_model("grok-4-1-fast-reasoning");
+        assert!(bare.same_family(&canonical));
+    }
+
+    #[test]
+    fn same_family_different_families() {
+        let grok3 = ModelProfile::for_model("grok-3");
+        let grok4 = ModelProfile::for_model("grok-4-1-fast-reasoning");
+        assert!(!grok3.same_family(&grok4));
+    }
+
+    #[test]
+    fn same_family_mini_fast_matches_mini() {
+        let mini = ModelProfile::for_model("grok-3-mini");
+        let mini_fast = ModelProfile::for_model("grok-3-mini-fast-0415");
+        assert!(mini.same_family(&mini_fast));
+    }
+
     // --- format_for_picker ---
 
     #[test]
     fn format_for_picker_current_model_marked() {
         let profile = ModelProfile::for_model("grok-3");
-        let display = profile.format_for_picker("grok-3");
+        let current = ModelProfile::for_model("grok-3");
+        let display = profile.format_for_picker(&current);
         assert!(display.contains("current"), "current model should be marked");
+    }
+
+    #[test]
+    fn format_for_picker_date_suffix_still_marked_current() {
+        let profile = ModelProfile::for_model("grok-4-1-fast-reasoning");
+        let current = ModelProfile::for_model("grok-4-1-fast-reasoning-0415");
+        let display = profile.format_for_picker(&current);
+        assert!(
+            display.contains("current"),
+            "date-suffixed variant should mark the canonical entry as current"
+        );
     }
 
     #[test]
     fn format_for_picker_non_current_not_marked() {
         let profile = ModelProfile::for_model("grok-3");
-        let display = profile.format_for_picker("grok-4-1-fast-reasoning");
+        let current = ModelProfile::for_model("grok-4-1-fast-reasoning");
+        let display = profile.format_for_picker(&current);
         assert!(!display.contains("current"));
     }
 
     #[test]
     fn format_for_picker_shows_context_window() {
+        let other = ModelProfile::for_model("other");
         let p = ModelProfile::for_model("grok-4-1-fast-reasoning");
-        assert!(p.format_for_picker("other").contains("2.1M"));
+        assert!(p.format_for_picker(&other).contains("2.1M"));
 
         let p = ModelProfile::for_model("grok-3");
-        assert!(p.format_for_picker("other").contains("131K"));
+        assert!(p.format_for_picker(&other).contains("131K"));
     }
 
     #[test]
     fn format_for_picker_shows_reasoning() {
+        let other = ModelProfile::for_model("other");
         let p = ModelProfile::for_model("grok-4-1-fast-reasoning");
-        assert!(p.format_for_picker("other").contains("encrypted reasoning"));
+        assert!(p.format_for_picker(&other).contains("encrypted reasoning"));
 
         let p = ModelProfile::for_model("grok-3-mini");
-        assert!(p.format_for_picker("other").contains("plaintext reasoning"));
+        assert!(p.format_for_picker(&other).contains("plaintext reasoning"));
     }
 
     #[test]
     fn format_for_picker_shows_pricing() {
+        let other = ModelProfile::for_model("other");
         let p = ModelProfile::for_model("grok-3");
-        assert!(p.format_for_picker("other").contains("$3.00/$15.00"));
+        assert!(p.format_for_picker(&other).contains("$3.00/$15.00"));
     }
 
     // --- format_context_window ---

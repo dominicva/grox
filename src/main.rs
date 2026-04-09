@@ -425,18 +425,20 @@ async fn main() -> Result<()> {
                             // Interactive model picker
                             let models = model_profile::ModelProfile::known_models();
                             let current = client.model().to_string();
+                            let current_profile =
+                                model_profile::ModelProfile::for_model(&current);
 
                             let choices: Vec<ModelPickerChoice> = models
                                 .iter()
                                 .map(|(_, profile)| ModelPickerChoice {
                                     name: profile.name.clone(),
-                                    display: profile.format_for_picker(&current),
+                                    display: profile.format_for_picker(&current_profile),
                                 })
                                 .collect();
 
-                            let starting_cursor = choices
+                            let starting_cursor = models
                                 .iter()
-                                .position(|c| c.name == current)
+                                .position(|(_, p)| p.same_family(&current_profile))
                                 .unwrap_or(0);
 
                             match inquire::Select::new("select a model:", choices)
@@ -445,7 +447,9 @@ async fn main() -> Result<()> {
                                 .prompt()
                             {
                                 Ok(choice) => {
-                                    if choice.name == current {
+                                    let choice_profile =
+                                        model_profile::ModelProfile::for_model(&choice.name);
+                                    if choice_profile.same_family(&current_profile) {
                                         println!(
                                             "{}",
                                             format!("  already using {}", current).dimmed()
