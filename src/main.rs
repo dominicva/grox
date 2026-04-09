@@ -372,6 +372,13 @@ async fn main() -> Result<()> {
     let mut rl = Editor::with_config(config)?;
     rl.set_helper(Some(GroxHelper::with_file_index(file_idx.clone())));
     let mut term_renderer = renderer::TerminalRenderer::new();
+    // Seed cumulative stats from persisted session data (matters for --resume)
+    term_renderer.seed_cumulative(
+        session_meta.cumulative_input_tokens,
+        session_meta.cumulative_output_tokens,
+        session_meta.cumulative_cached_input_tokens,
+        session_meta.cumulative_cost,
+    );
 
     // Bind Ctrl+T to toggle thinking display
     rl.bind_sequence(
@@ -676,6 +683,12 @@ async fn main() -> Result<()> {
                                                     })
                                                     .count();
                                                 session_meta = target.clone();
+                                                term_renderer.seed_cumulative(
+                                                    session_meta.cumulative_input_tokens,
+                                                    session_meta.cumulative_output_tokens,
+                                                    session_meta.cumulative_cached_input_tokens,
+                                                    session_meta.cumulative_cost,
+                                                );
                                                 history = entries;
                                                 transcript =
                                                     Transcript::new(SessionMeta::transcript_path(
@@ -762,8 +775,15 @@ async fn main() -> Result<()> {
                         };
 
                         if let Some(u) = &result.llm_usage {
+                            term_renderer.record_usage(client.model(), u);
                             session_meta.cumulative_input_tokens += u.input_tokens;
                             session_meta.cumulative_output_tokens += u.output_tokens;
+                            if let Some(cached) = u.cached_input_tokens {
+                                session_meta.cumulative_cached_input_tokens += cached;
+                            }
+                            if let Some(cost) = model_profile::ModelProfile::for_model(client.model()).estimate_cost_from_usage(u) {
+                                session_meta.cumulative_cost += cost;
+                            }
                             let _ = session_meta.save(&sessions_dir);
                         }
 
@@ -838,6 +858,12 @@ async fn main() -> Result<()> {
                 term_renderer.record_usage(client.model(), u);
                 session_meta.cumulative_input_tokens += u.input_tokens;
                 session_meta.cumulative_output_tokens += u.output_tokens;
+                if let Some(cached) = u.cached_input_tokens {
+                    session_meta.cumulative_cached_input_tokens += cached;
+                }
+                if let Some(cost) = model_profile::ModelProfile::for_model(client.model()).estimate_cost_from_usage(u) {
+                    session_meta.cumulative_cost += cost;
+                }
                 let _ = session_meta.save(&sessions_dir);
             }
             if result.compacted {
@@ -922,6 +948,12 @@ async fn main() -> Result<()> {
                     term_renderer.print_turn_stats(client.model(), usage);
                     session_meta.cumulative_input_tokens += usage.input_tokens;
                     session_meta.cumulative_output_tokens += usage.output_tokens;
+                    if let Some(cached) = usage.cached_input_tokens {
+                        session_meta.cumulative_cached_input_tokens += cached;
+                    }
+                    if let Some(cost) = model_profile::ModelProfile::for_model(client.model()).estimate_cost_from_usage(usage) {
+                        session_meta.cumulative_cost += cost;
+                    }
                 }
                 term_renderer.print_status_line(
                     client.model(),

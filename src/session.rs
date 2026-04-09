@@ -331,6 +331,12 @@ pub struct SessionMeta {
     pub project_root: String,
     pub cumulative_input_tokens: u64,
     pub cumulative_output_tokens: u64,
+    /// Cumulative cached input tokens across all turns (added in Phase 4).
+    #[serde(default)]
+    pub cumulative_cached_input_tokens: u64,
+    /// Cumulative estimated cost across all turns in USD (added in Phase 4).
+    #[serde(default)]
+    pub cumulative_cost: f64,
     pub last_active: DateTime<Utc>,
     pub summary: String,
 }
@@ -346,6 +352,8 @@ impl SessionMeta {
             project_root: project_root.into(),
             cumulative_input_tokens: 0,
             cumulative_output_tokens: 0,
+            cumulative_cached_input_tokens: 0,
+            cumulative_cost: 0.0,
             last_active: now,
             summary: String::new(),
         }
